@@ -44,6 +44,12 @@ set_target_properties(minhook_lib PROPERTIES
 # ---------------------------------------------------------------------------
 # The inject DLL itself
 # ---------------------------------------------------------------------------
+if(MSVC)
+    set(KH2COOP_GATEWAY_ASM src/NativeOwnedEmitterGatewayRaw.asm)
+else()
+    set(KH2COOP_GATEWAY_ASM src/NativeOwnedEmitterGatewayRaw.S)
+endif()
+
 add_library(kh2coop_inject SHARED
     src/DllMain.cpp
     src/SteamCapabilityProbe.cpp
@@ -63,7 +69,7 @@ add_library(kh2coop_inject SHARED
     src/NativeResourceTrace.cpp
     src/NativeOwnedEmitterCode.cpp
     src/NativeOwnedEmitterGateway.cpp
-    src/NativeOwnedEmitterGatewayRaw.asm
+    ${KH2COOP_GATEWAY_ASM}
     src/NativeOwnedEmitterInstall.cpp
     src/NativePrivateStatus.cpp
     src/NativeLifetimeTrace.cpp
@@ -103,6 +109,7 @@ target_compile_definitions(kh2coop_inject PRIVATE
 
 set_target_properties(kh2coop_inject PROPERTIES
     OUTPUT_NAME "kh2coop_inject"
+    PREFIX ""
     # Use a staging directory so we can build while the DLL is loaded in-game.
     # Copy the new build manually or restart KH2 to pick it up.
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/inject/staging"

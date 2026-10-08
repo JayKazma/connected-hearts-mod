@@ -2772,7 +2772,7 @@ static void __fastcall HookedFriendPrePhysics(void* typeHandler, void* actorObj)
 // For other entities: call the original.
 // ============================================================================
 
-static alignas(16) float g_zeroVec4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+alignas(16) static float g_zeroVec4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 static void* __fastcall HookedFollowSteering(void* typeHandler, void* outVec4,
                                                void* entity, float dt) {

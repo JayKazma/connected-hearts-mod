@@ -300,7 +300,11 @@ endif()
 # Only builds on Windows (requires MinHook, XInput, PE headers).
 # ---------------------------------------------------------------------------
 if(WIN32)
-    enable_language(ASM_MASM)
+    if(MSVC)
+        enable_language(ASM_MASM)
+    else()
+        enable_language(ASM)
+    endif()
     add_subdirectory(tools/kh2ctl)
     add_subdirectory(inject)
 
