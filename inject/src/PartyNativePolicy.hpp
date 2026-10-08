@@ -180,6 +180,8 @@ struct LoadInput {
     std::uint16_t native0 = 0;
 };
 Load Decide(const LoadInput& in);
+// One clone: the resolved member (1 or 2) the clone replaces for this load; 0 = no replaceable member.
+unsigned OneCloneIndex(const LoadInput& in);
 // Rev3: the observer writes members 0, 1 (the clones, built first) and 2 (the canonical local, built
 // last: raw568, live run 20261007-084248). set0/set1 = clone kits, set2 = this machine's own kit.
 struct Originals { bool valid = false; std::uint16_t member0 = 0, member1 = 0, member2 = 0, set0 = 0, set1 = 0, set2 = 0; };

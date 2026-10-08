@@ -143,6 +143,7 @@ std::uint32_t g_spawnPickUnknownEpoch = 0;      // review F2: a resync target wh
 std::uint32_t g_seenTransition = 0;
 std::uint32_t g_seenLoad = 0;
 std::uint32_t g_epoch = 0;          // host: current epoch
+constexpr std::uint16_t WORLD_MAP_ID = 0x0F; // the world map / gummi ship screen (NOW world 15, room 0)
 // Source ordering belongs to this DLL lifetime, not a room, manifest or
 // transport generation. Failed enqueue attempts consume their sample number.
 std::uint64_t g_hpSourceSequence = 0;
@@ -3439,7 +3440,28 @@ bool ReceiveWorldPackets() {
                 // Reliable delivery normally orders these, but never let an
                 // old/replayed epoch roll back authority. Epoch zero is unset.
                 const auto advance = t.epoch - g_host.epoch;
-                if (t.epoch != 0 && (g_host.epoch == 0 || (advance != 0 && advance < 0x80000000u))) {
+                const bool accept = t.epoch != 0 && (g_host.epoch == 0 || (advance != 0 && advance < 0x80000000u));
+                // World map (0F/00): the host is choosing a destination or flying the gummi route. Loading our
+                // own world map screen just to leave it again costs two loads and shows a screen nobody plays
+                // on, so stay where we are, carry the epoch forward (later epochs still advance from it) and
+                // follow the landing room when its epoch arrives. Nothing to ack: the host does not consume
+                // TransitionAck, and no enemies exist there.
+                if (accept && t.worldId == WORLD_MAP_ID && g_host.epoch != 0) {
+                    const std::uint16_t hereWorld = g_inst.world, hereRoom = g_inst.room;
+                    g_host = {};                 // the host's old room is gone: no stale manifest, hits or poses
+                    g_mirror.Reset(0);
+                    ClearActivation();
+                    ClearPendingHits();
+                    g_lastHashMs = 0;
+                    g_host.epoch = t.epoch;
+                    g_host.world = t.worldId;
+                    g_host.room = t.roomId;
+                    g_host.btl = t.battleProgram;
+                    SYNC_LOG("[enemysync] client: host on the world map epoch %u; staying in %02X/%02X until the host lands",
+                             t.epoch, hereWorld, hereRoom);
+                    continue;
+                }
+                if (accept) {
                     ProducerWorldContext loadContext;
                     const bool loadContextAvailable = CaptureWorldContext(loadContext);
                     if (!loadContextAvailable || !warp::QueueHostTransition(t, loadContext, &*scope, nullptr, nullptr)) {

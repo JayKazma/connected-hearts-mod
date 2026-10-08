@@ -120,13 +120,14 @@ bool EnemyTargetProfile(Stamp& s) {
         if(s.now[0]==r.world && s.now[1]==r.room)return Read(g_base+0x9A98B0+0x3534+4*r.world,row) && row==r.row;
     return false;
 }
-// One-clone party profile (2 players): PartyNative replaced member 1 with Sora for this load in an
-// allowed room, over the untouched DEFAULT row. Same 566-clone / 567-local binding as VUH-1489.
+// One-clone party profile (2 players): PartyNative replaced member 1 (or, past a guest, member 2) with
+// Sora for this load in an allowed room; the save row is never written. 566-clone binding as VUH-1489; the
+// local is the next Sora construction (567, or 568 when a guest sits between). AppliedClones()==1 is the
+// observer's own proof that the members still hold what it wrote, over whichever row the world has.
 bool OneCloneProfile(Stamp& s) {
-    std::array<std::uint8_t,4> row{},magic{};
+    std::array<std::uint8_t,4> magic{};
     return partynative::AppliedClones()==1 && StampNow(s) && partynative::RoomAllowed(s.now[0],s.now[1],0) &&
-        Read(g_base+0x9A98B0,magic) && magic==std::array<std::uint8_t,4>{'K','H','2','J'} &&
-        Read(g_base+0x9A98B0+0x3534+4u*s.now[0],row) && row==partynative::DEFAULT_ROW;
+        Read(g_base+0x9A98B0,magic) && magic==std::array<std::uint8_t,4>{'K','H','2','J'};
 }
 bool Profile(Stamp& s) {
     if(g_enemyTargetScope.load() && EnemyTargetProfile(s))return true; // VUH-1515
@@ -281,9 +282,14 @@ uintptr_t __fastcall Factory(std::uint32_t id,const float* point,float yaw) {
             }
             if(reason)BindFault(reason);
             else for(unsigned k=0;k<PartyClones;++k){Selection b{};b.serial=p.serial[k];b.actor=p.actor[k];b.status=p.status[k];b.local=result;b.localStatus=status;Publish(3,b);}
-        } else if(ordinary && id==567 && g_pending.armed) {
+        } else if(ordinary && (id==567 || id==568) && g_pending.armed) {
             // Exactly one later Sora construction must take the canonical player pointer away
             // from the clone and receive an ordinary, distinct status. Otherwise refuse.
+            // Guest worlds build the party as Sora / guest / Sora: raw567 is then the guest, not a Sora,
+            // and the local is raw568. The guest construction leaves the pending clone armed.
+            uintptr_t guestStatus=0;
+            if(id==567 && result && !SoraActor(result,guestStatus)) { /* the guest: keep waiting for 568 */ }
+            else {
             const Pending p=g_pending;g_pending={};
             uintptr_t status=0,clone=0,player=0;Stamp after{};
             const unsigned reason=!result || result==p.actor?1:!SoraActor(result,status)?2:Owned(status)?3:status==p.status?4:
@@ -291,6 +297,7 @@ uintptr_t __fastcall Factory(std::uint32_t id,const float* point,float yaw) {
                 !StampNow(after) || !Same(after,p.stamp)?8:0;
             if(reason)BindFault(reason);
             else {Selection b{};b.serial=p.serial;b.actor=p.actor;b.status=p.status;b.local=result;b.localStatus=status;Publish(3,b);}
+            }
         }
         if(!RestoreScope(token))Fault();SetLastError(nativeError);
     }
