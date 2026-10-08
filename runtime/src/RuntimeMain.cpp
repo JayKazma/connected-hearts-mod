@@ -89,14 +89,25 @@ kh2coop::AvatarSync::Config avatarSyncConfigFromEnvironment() {
 #else
     if (const char* value = std::getenv("KH2COOP_AVATAR_HOLD_MS")) text = value;
 #endif
-    if (text.empty()) return config;
     if (const auto parsed = kh2coop::parseAvatarHoldMs(text)) {
         config.releaseAfterMs = *parsed;
         std::cout << "[avatar] KH2COOP_AVATAR_HOLD_MS=" << *parsed << " (release after " << *parsed << " ms)\n";
-    } else {
+    } else if (!text.empty()) {
         std::cout << "[avatar] KH2COOP_AVATAR_HOLD_MS ignored (want 1000..10000); release after "
                   << config.releaseAfterMs << " ms\n";
     }
+    text.clear();
+#ifdef _WIN32
+    value = nullptr; length = 0;
+    if (_dupenv_s(&value, &length, "KH2COOP_AVATAR_RENDER_DELAY_MS") == 0 && value) text = value;
+    std::free(value);
+#else
+    if (const char* value = std::getenv("KH2COOP_AVATAR_RENDER_DELAY_MS")) text = value;
+#endif
+    const auto delay = kh2coop::latency::parseAvatarDelayMs(text);
+    config.renderDelayMs = delay.value_or(kh2coop::latency::kAvatarDelayMs);
+    std::cout << "[latency] avatarRenderDelayMs=" << config.renderDelayMs
+              << " source=" << (text.empty() ? "default" : delay ? "env" : "invalid-default") << '\n';
     return config;
 }
 
@@ -899,7 +910,8 @@ int main(int argc, char* argv[]) {
     // Avatar path (plan D2/D9): the DLL publishes the local avatar into the
     // bridge; we send it to the relay, feed received avatars to AvatarSync and
     // publish interpolated puppet poses back for the DLL to apply.
-    kh2coop::AvatarSync avatarSync(options.config.ownedSlot, avatarSyncConfigFromEnvironment());
+    const auto avatarConfig = avatarSyncConfigFromEnvironment();
+    kh2coop::AvatarSync avatarSync(options.config.ownedSlot, avatarConfig);
     std::string avatarSessionId;
     // Assigned after the existing diagnostic binding is available. Earlier
     // world-reset lambdas invoke it only at their actual state boundaries.
@@ -1773,6 +1785,11 @@ int main(int argc, char* argv[]) {
     // sleep rounds to 16-31 ms on Windows and made puppets stop-go (VUH-1492).
     std::uint16_t pumpWorld = 0;
     std::uint16_t pumpRoom = 0;
+    char latencyTraceOption[2] {};
+    unsigned avatarLatencyTraceBudget = GetEnvironmentVariableA("KH2COOP_LATENCY_TRACE", latencyTraceOption,
+        sizeof(latencyTraceOption)) == 1 && latencyTraceOption[0] == '1' ? 18000u : 0u;
+    std::uint64_t avatarTraceAt = 0;
+    std::array<std::uint64_t, 2> avatarActiveSamples {}, avatarUnderrunSamples {}, avatarHeldSamples {};
     const auto pumpAvatars = [&](std::uint16_t worldId, std::uint16_t roomId) {
         pumpWorld = worldId;
         pumpRoom = roomId;
@@ -1827,10 +1844,10 @@ int main(int argc, char* argv[]) {
             netClient->sendAvatar(local);
         }
         std::array<kh2coop::PuppetTarget, 2> targets;
+        const auto serverNowMs = netClient->estimatedServerTimeMs();
         {
             std::lock_guard<std::mutex> lock(replicaMtx);
-            const auto serverNow = netClient->estimatedServerTimeMs();
-            targets = avatarSync.sample(serverNow, worldId, roomId);
+            targets = avatarSync.sample(serverNowMs, worldId, roomId);
             // Diagnostic (KH2COOP_AVATAR_DIAG=1): why a remote avatar is or is not shown.
             static const bool avatarDiag = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_AVATAR_DIAG", v, 2) == 1 && v[0] == '1'; }();
             static std::uint64_t lastDiagMs = 0;
@@ -1840,7 +1857,7 @@ int main(int argc, char* argv[]) {
                 for (int i = 0; i < 2; ++i) {
                     const auto* p = avatarSync.newestFor(owners[i]);
                     if (!p) { std::cout << "[avatar-diag] puppet " << i << " owner slot " << owners[i] << ": no pose received\n"; continue; }
-                    const std::int64_t age = static_cast<std::int64_t>(serverNow) - static_cast<std::int64_t>(p->serverTimeMs);
+                    const std::int64_t age = static_cast<std::int64_t>(serverNowMs) - static_cast<std::int64_t>(p->serverTimeMs);
                     std::cout << "[avatar-diag] puppet " << i << " active=" << (targets[i].active ? 1 : 0)
                               << " ageMs=" << age << " remote=" << p->worldId << "/" << p->roomId
                               << " local=" << worldId << "/" << roomId << " flags=" << unsigned(p->flags)
@@ -1860,6 +1877,26 @@ int main(int argc, char* argv[]) {
             pose.provenance.localConnectionId = worldConnectionIds[worldSessionSlot];
             pose.provenance.hostConnectionId = worldConnectionIds[0];
             avatarBridge.PublishPuppet(i, pose);
+            if (avatarLatencyTraceBudget && targets[i].active) {
+                ++avatarActiveSamples[i];
+                const auto renderMs = serverNowMs > avatarConfig.renderDelayMs
+                    ? serverNowMs - avatarConfig.renderDelayMs : 0;
+                // Interpolated output carries renderMs; extrapolated output retains newest source time.
+                if (targets[i].pose.serverTimeMs < renderMs) ++avatarUnderrunSamples[i];
+                if (targets[i].pose.flags & kh2coop::AvatarHeld) ++avatarHeldSamples[i];
+            }
+        }
+        const auto traceNow = avatarLatencyTraceBudget ? GetTickCount64() : 0;
+        if (avatarLatencyTraceBudget && traceNow - avatarTraceAt >= 20) {
+            --avatarLatencyTraceBudget;
+            avatarTraceAt = traceNow;
+            LARGE_INTEGER qpc {}; QueryPerformanceCounter(&qpc);
+            for (int i = 0; i < 2; ++i)
+                std::cout << "[latency-avatar] qpc=" << qpc.QuadPart << " tickMs=" << traceNow
+                          << " puppet=" << i << " owner=" << targets[i].ownerConnectionId
+                          << " activeSamples=" << avatarActiveSamples[i] << " underrunSamples=" << avatarUnderrunSamples[i]
+                          << " heldSamples=" << avatarHeldSamples[i] << '\n';
+            std::cout << std::flush;
         }
     };
     // 1 ms sleep granularity for the pump; restored at shutdown.
