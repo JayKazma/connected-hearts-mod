@@ -360,9 +360,15 @@ Reapply ApplyReapply(Intent& intent, const PartyReapply& reapply, std::uint32_t 
 // One clone: which resolved member (1 or 2) the clone replaces; 0 = none. Member 1 when it is Donald or
 // Goofy (DEFAULT row and most guest rows); member 2 when a guest sits in member 1 (the party is then
 // Sora / guest / Sora: 566 Sora builds first and becomes the clone, 568 Sora builds last and is the local).
+// The resolver always yields Sora/Donald/Goofy objects; the party row says which of
+// Donald (row id 1) / Goofy (row id 2) is on the field (row slots 1-2) and which is
+// benched (slot 3). Clone the one on the field, or the clone never appears.
 unsigned OneCloneIndex(const LoadInput& in) {
-    if (in.resolved[1] == DONALD || in.resolved[1] == GOOFY) return 1;
-    if (in.resolved[2] == DONALD || in.resolved[2] == GOOFY) return 2;
+    constexpr std::uint8_t ROW_DONALD = 1, ROW_GOOFY = 2;
+    for (unsigned slot = 1; slot <= 2; ++slot) {
+        if (in.row[slot] == ROW_DONALD && in.resolved[1] == DONALD) return 1;
+        if (in.row[slot] == ROW_GOOFY && in.resolved[2] == GOOFY) return 2;
+    }
     return 0;
 }
 
