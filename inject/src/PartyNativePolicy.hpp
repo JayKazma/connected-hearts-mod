@@ -12,7 +12,8 @@ namespace kh2coop::inject::partynative {
 enum class Plan : std::uint8_t {
     None,         // no accepted layout: native party
     Unsupported,  // accepted, but not the qualified case: native party
-    TwoClones     // both native friend seats are remote-player Sora clones
+    TwoClones,    // both native friend seats are remote-player Sora clones
+    OneClone      // 2 players: friend seat 1 is the remote player's Sora clone, seat 2 stays the native companion
 };
 const char* PlanName(Plan p);
 
@@ -78,6 +79,9 @@ bool Rebase(Intent& intent, std::uint32_t generation, const std::array<std::uint
 // Pinned qualified rooms (authored rule DEFAULT, no evt program 0 Party opcode, world-4 row
 // 00/01/02/12): GoA 04/1A and 04/0A (hb10), both at evt 0.
 bool QualifiedRoom(std::uint16_t world, std::uint16_t room, std::uint16_t evt);
+// One-clone mode: the pinned rooms, or any ordinary room at evt 0 (Decide still requires the
+// native DEFAULT row with Donald/Goofy resolved and no event/cutscene).
+bool RoomAllowed(std::uint16_t world, std::uint16_t room, std::uint16_t evt);
 // The plan for a PartyIntent on this machine (same projection as a layout).
 // Party kits: a non-Sora kit is Unsupported unless `kitsAllowed` (KH2COOP_PARTY_KITS on this machine).
 Plan ProjectIntent(const PartyIntent& intent, std::uint8_t localSlot, bool kitsAllowed = false);

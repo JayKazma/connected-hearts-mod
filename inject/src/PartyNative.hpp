@@ -53,9 +53,11 @@ bool Requested();
 // no member write, no publication, no adoption. Logged.
 using ReadyProbe = bool (*)();
 void ConfirmLocalReadiness(bool resolverHookInstalled, ReadyProbe neutralInputConfigured);
-// 2 while the last area load applied TwoClones and members 1/2 still hold Sora;
-// otherwise 0. Read by NativePrivateStatus on the game thread.
+// 2 while the last area load applied TwoClones and members 1/2 still hold Sora; 1 while it applied
+// OneClone and member 1 still holds Sora; otherwise 0. Read by NativePrivateStatus on the game thread.
 unsigned AppliedClones();
+// One-clone mode's room predicate (pure policy; defined with the policy code).
+bool RoomAllowed(std::uint16_t world, std::uint16_t room, std::uint16_t evt);
 // Party kits (KH2COOP_PARTY_KITS=1 accepted at Install): per-seat kits are on for this machine.
 bool KitsActive();
 // Party kits: the clone kits the last applied load wrote (rev3: members 0/1; member 2 = AppliedLocal()).

@@ -120,8 +120,17 @@ bool EnemyTargetProfile(Stamp& s) {
         if(s.now[0]==r.world && s.now[1]==r.room)return Read(g_base+0x9A98B0+0x3534+4*r.world,row) && row==r.row;
     return false;
 }
+// One-clone party profile (2 players): PartyNative replaced member 1 with Sora for this load in an
+// allowed room, over the untouched DEFAULT row. Same 566-clone / 567-local binding as VUH-1489.
+bool OneCloneProfile(Stamp& s) {
+    std::array<std::uint8_t,4> row{},magic{};
+    return partynative::AppliedClones()==1 && StampNow(s) && partynative::RoomAllowed(s.now[0],s.now[1],0) &&
+        Read(g_base+0x9A98B0,magic) && magic==std::array<std::uint8_t,4>{'K','H','2','J'} &&
+        Read(g_base+0x9A98B0+0x3534+4u*s.now[0],row) && row==partynative::DEFAULT_ROW;
+}
 bool Profile(Stamp& s) {
     if(g_enemyTargetScope.load() && EnemyTargetProfile(s))return true; // VUH-1515
+    if(OneCloneProfile(s))return true;
     std::array<std::uint8_t,4> row{},magic{};
     return StampNow(s) && s.now[0]==4 && s.now[1]==0x1A &&
         Read(g_base+0x9A98B0,magic) && magic==std::array<std::uint8_t,4>{'K','H','2','J'} &&
