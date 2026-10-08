@@ -249,6 +249,10 @@ uintptr_t __fastcall Factory(std::uint32_t id,const float* point,float yaw) {
     __finally {
         const DWORD nativeError=GetLastError();
         auto* top=Top(token);
+        if(returned && ordinary && id>=566 && id<=568 && partynative::AppliedClones()==1) { // one-clone build trace (diagnostic)
+            std::uint16_t m[4]{};uintptr_t st=0;Read(g_base+playerkit::RVA_RESOLVED_MEMBERS,m);
+            PublishBuild(id-565,id,3,result,std::uint64_t(m[0])|std::uint64_t(m[1])<<16|std::uint64_t(m[2])<<32|std::uint64_t(m[3])<<48,result && SoraActor(result,st)?1:0);
+        }
         if(!returned){Fault();}
         else if(top && top->selected) {
             uintptr_t actual=0;Stamp after{};
@@ -561,6 +565,7 @@ void Drain(LogFn log) {
             ReleaseSRWLockExclusive(&g_queueLock);
         }
         if(!have)break;
+        if(e.kind==4 && e.role==3){log("[privatestatus] one-clone build id=%u actor=%llX sora=%d resolved=%llX/%llX/%llX/%llX frame=%u",e.factoryId,e.actor,e.key,e.serial&0xFFFF,(e.serial>>16)&0xFFFF,(e.serial>>32)&0xFFFF,(e.serial>>48)&0xFFFF,e.frame);continue;}
         if(e.kind==4){log("[privatestatus] party build order=%u id=%u role=%s actor=%llX serial=%llu tid=%u frame=%u key=%d",e.order,e.factoryId,e.role==2?"local":"clone",e.actor,e.serial,e.thread,e.frame,e.key);continue;}
         log("[privatestatus] kind=%u serial=%llu tid=%u actor=%llX local=%llX status=%llX localStatus=%llX index=%d hp=%d localHp=%d",e.kind,e.serial,e.thread,e.actor,e.local,e.status,e.localStatus,e.index,e.hp,e.localHp);
     }
