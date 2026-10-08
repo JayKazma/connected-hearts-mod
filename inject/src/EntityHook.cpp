@@ -469,6 +469,23 @@ static constexpr uint8_t kLimitByCmdBytes[] = {
     0x4c, 0x8b, 0x1d, 0x59, 0xda, 0x6f, 0x02, 0x45, 0x33, 0xc9, 0x4d, 0x63, 0x53, 0x04, 0x4d, 0x85};
 static constexpr int LIMIT_STATE_GREYED = 5;
 static PFN_LimitMenuState g_origLimitMenuState = nullptr;
+
+// Party character index (0x3E60C0: character id 1..15 -> index; 0 = none). Four callers index
+// per-FRIEND ability bitfields at (index - 2) and never expect a Sora (index 1) in a friend seat;
+// with a one-clone party the first-person view check (0x36A3A0) read at a negative offset and
+// crashed (laptop dump 2026-10-08). For those callers a Sora friend reports Donald's index.
+typedef int(__fastcall* PFN_PartyCharIndex)(int characterId);
+static PFN_PartyCharIndex g_origPartyCharIndex = nullptr;
+static constexpr uint64_t RVA_PARTY_CHAR_INDEX = 0x3E60C0;
+static constexpr uint8_t kPartyCharIndexBytes[] = {0x8D, 0x41, 0xFF, 0x83, 0xF8, 0x0E, 0x77, 0x1B, 0x83, 0xF9, 0x0E, 0x75, 0x08};
+static constexpr uint64_t kFriendAbilityCallers[] = {0x360AFF, 0x36A190, 0x36A475, 0x36A732}; // return addresses
+static int __fastcall HookedPartyCharIndex(int characterId) {
+    const int index = g_origPartyCharIndex(characterId);
+    if (index != 1) return index;
+    const auto ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    for (const auto rva : kFriendAbilityCallers) if (ret == g_exeBase + rva) return 2;
+    return index;
+}
 static PFN_LimitLookup g_origLimitUsable = nullptr;
 static PFN_LimitLookup g_limitByCmd = nullptr;
 
@@ -3576,6 +3593,20 @@ bool Initialize(uintptr_t exeBase) {
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the
     // module's own neutral-input state are all ready (no-op when party-native is off).
     partynative::ConfirmLocalReadiness(playerkit::GetStats().installed, &cloneneutral::Enabled);
+    // One-clone party: friend-ability lookups must not see a Sora friend (crash in first-person view).
+    if (partynative::Requested()) {
+        if (std::memcmp(reinterpret_cast<const void*>(exeBase + RVA_PARTY_CHAR_INDEX), kPartyCharIndexBytes,
+                        sizeof(kPartyCharIndexBytes)) == 0) {
+            void* target = reinterpret_cast<void*>(exeBase + RVA_PARTY_CHAR_INDEX);
+            MH_STATUS st = MH_CreateHook(target, reinterpret_cast<void*>(&HookedPartyCharIndex),
+                                         reinterpret_cast<void**>(&g_origPartyCharIndex));
+            if (st == MH_OK) st = MH_EnableHook(target);
+            if (st == MH_OK) Log("  Party char index hook installed (0x3E60C0): a Sora friend reads Donald's ability bits");
+            else Log("  WARNING: party char index hook failed: %d (%s)", st, MH_StatusToString(st));
+        } else {
+            Log("  WARNING: 0x3E60C0 doesn't match this build; first-person view may crash with a clone");
+        }
+    }
     lifetimetrace::Initialize(exeBase);
     if (lifetimetrace::GetStatistics().requested) {
         const auto s = lifetimetrace::GetStatistics();
