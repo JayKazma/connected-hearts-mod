@@ -73,6 +73,7 @@ class Native final:public steam::Api {
     bool (__cdecl *info_)(void*,std::uint32_t,Info*)=nullptr;
     int (__cdecl *send_)(void*,std::uint32_t,const void*,std::uint32_t,int,std::int64_t*)=nullptr;
     int (__cdecl *receive_)(void*,std::uint32_t,Message**,int)=nullptr;
+    void (__cdecl *runCallbacks_)(void*)=nullptr; // optional: KH2 rarely pumps Steam callbacks itself
     int (__cdecl *quality_)(void*,std::uint32_t,Quality*,int,void*)=nullptr;
     void (__cdecl *identitySet_)(Identity*,std::uint64_t)=nullptr;
     std::uint64_t (__cdecl *identityGet_)(const Identity*)=nullptr;
@@ -105,6 +106,7 @@ public:
         GET(quality_,"SteamAPI_ISteamNetworkingSockets_GetConnectionRealTimeStatus");
         GET(identitySet_,"SteamAPI_SteamNetworkingIdentity_SetSteamID64");GET(identityGet_,"SteamAPI_SteamNetworkingIdentity_GetSteamID64");
 #undef GET
+        load(m,runCallbacks_,"SteamAPI_ISteamNetworkingSockets_RunCallbacks");
         module_=m;boundPipe_=pipeHandle_();
         if(!userHandle_()||!boundPipe_)return false;
         user_=getUser_();utils_=getUtils_();sockets_=getSockets_();nu_=getNetworkUtils_();
@@ -144,10 +146,14 @@ public:
         c=g_changes[g_head];g_head=(g_head+1)%g_changes.size();--g_count;ReleaseSRWLockExclusive(&g_lock);
         if(!pipeAlive())return false;
         const auto id=identityGet_(&c.info.identity);
-        s={c.handle,c.info.listener,id,c.info.state,(c.info.flags&3)==0,(c.info.flags&16)!=0,
+// Incoming Connecting reports Unencrypted until accept finishes the handshake; Connected still needs both bits clear.
+        const int mustBeClear=(c.info.state==1&&c.info.listener)?1:3;
+        s={c.handle,c.info.listener,id,c.info.state,(c.info.flags&mustBeClear)==0,(c.info.flags&16)!=0,
            c.info.reason>=1000&&c.info.reason<=1009?static_cast<std::uint32_t>(c.info.reason-1000):0};
         std::fprintf(log_,"[steam-broker] callback handle=%u peer=%llu state=%d flags=%d listener=%u\n",c.handle,id,c.info.state,c.info.flags,c.info.listener);return true;
     }
+    bool pumps()const{return runCallbacks_!=nullptr;}
+    void pump(){if(runCallbacks_&&pipeAlive())runCallbacks_(sockets_);} // sockets-only queue; Changed is lock-protected
     bool healthy()const override{return healthy_&&!g_overflow.load(std::memory_order_acquire);}
     bool receive(std::uint32_t h,steam::Message& out) override {
         if(!pipeAlive())return false;
@@ -180,6 +186,7 @@ void run(FILE* log,HANDLE stop){
     while(!stopped(stop)&&api.pipeAlive()&&!api.readyIdentity()){if(GetTickCount64()>=deadline){std::fprintf(log,"[steam-broker] unavailable auth-relay\n");return;}if(stopped(stop,1000))return;}
     if(stopped(stop)||!api.pipeAlive())return;
     std::fprintf(log,"[steam-broker] ready appId=%u identity=%llu modulePinnedUntilExit=1\n",steam::AppId,api.readyIdentity());
+    std::fprintf(log,"[steam-broker] sockets-callback-pump=%u\n",unsigned(api.pumps()));
     while(!stopped(stop)&&api.pipeAlive()){
         steam::Pipe pipe;if(!pipe.serve()){std::fprintf(log,"[steam-broker] refused pipe-create\n");return;}
         steam::Broker broker(api);bool attached=false;
@@ -188,6 +195,7 @@ void run(FILE* log,HANDLE stop){
             if(!attached){attached=true;std::fprintf(log,"[steam-broker] runtime-attached\n");}
             steam::Frame f;for(unsigned n=0;n<32&&api.pipeAlive()&&broker.canCommand(pipe.queued())&&pipe.receive(f);++n){if(!broker.command(f,GetTickCount64()))break;}
             if(!api.pipeAlive())break;
+            api.pump();
             broker.tick(GetTickCount64(),pipe.queued());
             while(pipe.queued()<steam::MaxQueue&&broker.pop(f)){if(f.op==steam::Op::Error)std::fprintf(log,"[steam-broker] refused %.*s\n",static_cast<int>(f.bytes.size()),f.bytes.data());if(!pipe.send(f))break;}
             if(broker.failed()){

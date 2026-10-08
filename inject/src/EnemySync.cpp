@@ -1416,41 +1416,49 @@ bool EnsureClientClaimScope() {
     }
     return !h.poisoned && h.bound && !h.held;
 }
+static void ClaimHoldWhy(const char* why, std::uint32_t frame) {
+    // Diagnostic: why client hit claims stay held (at most one line per reason per 120 frames).
+    static std::uint32_t last = 0; static const char* lastWhy = nullptr;
+    if (!g_log) return;
+    if (why == lastWhy && frame - last < 120) return;
+    last = frame; lastWhy = why;
+    g_log("[client-claims-why] frame=%u held: %s", frame, why);
+}
 bool ReleaseClientClaims(std::uint32_t frame) {
     (void)EnsureClientClaimScope();
     auto& h = g_clientClaimHold;
-    if (!h.bound || h.poisoned) return false;
+    if (!h.bound || h.poisoned) { ClaimHoldWhy("claim scope not bound or poisoned", frame); return false; }
     if (!h.held) return true;
     if (!g_host.manifestComplete || !g_hostHpSequence || g_host.enemies.empty() ||
         (g_activationRecovery && (!g_activationRecovery->reconciled ||
             (g_activationRecovery->phase != ActivationRecoveryPhase::LiveHold &&
-             g_activationRecovery->phase != ActivationRecoveryPhase::Verified)))) return false;
+             g_activationRecovery->phase != ActivationRecoveryPhase::Verified)))) { ClaimHoldWhy("host manifest incomplete, no host HP yet, or recovery pending", frame); return false; }
     const auto scope = h.scope;
     const auto revision = g_clientManifestRevision, hpSequence = g_hostHpSequence;
     const auto census = CaptureNativeCensus();
-    if (!CensusMatchesInstance(census) || !SameLocation(census.location, scope.room)) return false;
+    if (!CensusMatchesInstance(census) || !SameLocation(census.location, scope.room)) { ClaimHoldWhy("local enemy census unavailable or not in the host's room", frame); return false; }
     std::size_t living = 0;
     for (const auto& [id, host] : g_host.enemies) {
         if (host.dead) continue;
         ++living;
-        if (!id || !host.hpKnown || host.hp <= 0 || host.maxHp <= 0 || host.hp > host.maxHp) return false;
+        if (!id || !host.hpKnown || host.hp <= 0 || host.maxHp <= 0 || host.hp > host.maxHp) { ClaimHoldWhy("host HP unknown/invalid for a living host enemy", frame); return false; }
         const Spawn* selected = nullptr;
         for (const auto& spawn : g_inst.spawns) {
             if (!spawn.present || spawn.killed || spawn.netId != id) continue;
-            if (selected) return false;
+            if (selected) { ClaimHoldWhy("two local enemies bound to the same host enemy", frame); return false; }
             selected = &spawn;
         }
-        if (!selected || selected->objectId != host.objectId || host.battleProgram != g_inst.btl) return false;
+        if (!selected || selected->objectId != host.objectId || host.battleProgram != g_inst.btl) { ClaimHoldWhy("a living host enemy has no matching local enemy (or objectId/battle program differs)", frame); return false; }
         const auto* native = FindNativeEnemy(census, *selected);
         NativeEnemy repeated; bool combat = false;
         if (!native || native->hp != host.hp || native->maxHp != host.maxHp ||
             !ReadNativeEnemy(native->actor, repeated, combat) || !combat ||
             !SameNativeIdentity(*native, repeated) || repeated.objectType != native->objectType ||
-            repeated.hp != host.hp || repeated.maxHp != host.maxHp) return false;
+            repeated.hp != host.hp || repeated.maxHp != host.maxHp) { if (g_log && native) g_log("[client-claims-why] netId=%d local hp=%d/%d host hp=%d/%d", id, native->hp, native->maxHp, host.hp, host.maxHp); ClaimHoldWhy("local enemy HP differs from host HP", frame); return false; }
     }
     // All current native combat rows must be accounted for, including extras
     // and dying rows. Authoritative empty-set release is intentionally absent.
-    if (!living || living != census.enemies.size()) return false;
+    if (!living || living != census.enemies.size()) { if (g_log) g_log("[client-claims-why] host living=%zu local enemies=%zu", living, census.enemies.size()); ClaimHoldWhy("living count mismatch between host manifest and local enemies", frame); return false; }
     for (const auto& native : census.enemies) {
         unsigned matches = 0;
         for (const auto& spawn : g_inst.spawns) {
@@ -1459,11 +1467,11 @@ bool ReleaseClientClaims(std::uint32_t frame) {
                 host != g_host.enemies.end() && !host->second.dead &&
                 FindNativeEnemy(census, spawn) == &native) ++matches;
         }
-        if (matches != 1) return false;
+        if (matches != 1) { ClaimHoldWhy("a local enemy matches zero or several host enemies", frame); return false; }
     }
     ClientClaimScope after;
     if (!ReadClientClaimScope(after) || !SameClientClaimScope(scope, after) ||
-        revision != g_clientManifestRevision || hpSequence != g_hostHpSequence || !CensusMatchesInstance(census)) return false;
+        revision != g_clientManifestRevision || hpSequence != g_hostHpSequence || !CensusMatchesInstance(census)) { ClaimHoldWhy("scope/revision changed during the match", frame); return false; }
     LogClientClaim("match-begin", "full-living-manifest", living);
     for (const auto& spawn : g_inst.spawns) {
         if (!spawn.present || spawn.killed || spawn.netId <= 0) continue;
@@ -3576,7 +3584,7 @@ bool ResyncNativeSampleCurrent(const NativeEnemy& expected) {
 
 // No C++ objects requiring unwinding in the SEH leaves that call/write native memory.
 bool WriteNativeHp(const NativeEnemy& expected, std::int32_t hp, std::uint32_t generation,
-                   const NativeRecordWriteCheck* record = nullptr) {
+                   const NativeRecordWriteCheck* record = nullptr, std::int32_t maxHp = 0) {
     __try {
         if (Read<uintptr_t>(expected.actor + offsets::actor::OBJENTRY_PTR) != expected.objentry ||
             Read<uintptr_t>(expected.actor + ACTOR_STATUS) != expected.status ||
@@ -3588,6 +3596,11 @@ bool WriteNativeHp(const NativeEnemy& expected, std::int32_t hp, std::uint32_t g
             Read<std::uint32_t>(expected.objentry + offsets::objentry::OBJECT_ID) != expected.objectId) return false;
         if (record && (hp <= 0 || hp > expected.maxHp || !ResyncNativeSampleCurrent(expected) ||
                        !ResyncFinalWriteContext(*record))) return false;
+        // Saves can differ in enemy max HP (difficulty/level); adopt the host's so the pack matches.
+        if (maxHp > 0 && maxHp != expected.maxHp) {
+            if (hp > maxHp) return false;
+            *reinterpret_cast<std::int32_t*>(expected.status + 4) = maxHp;
+        }
         *reinterpret_cast<std::int32_t*>(expected.status) = hp;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -3851,8 +3864,8 @@ bool ClientFrame(const NativeCensus& initialCensus) {
             // ordinary batch into another write: next owner frame resolves
             // the whole fresh census again. Existing per-spawn once fence stays.
             if (ordinaryLethal) return WorldSessionGeneration() == generation;
-        } else if (h.hp > 0 && native.hp != h.hp) {
-            if (!WriteNativeHp(native, h.hp, generation, recordCheck)) { // never 0: deaths are explicit
+        } else if (h.hp > 0 && (native.hp != h.hp || (h.maxHp > 0 && native.maxHp != h.maxHp))) {
+            if (!WriteNativeHp(native, h.hp, generation, recordCheck, h.maxHp)) { // never 0: deaths are explicit
                 if (contentRequired) {
                     clearBindings(); g_resyncWriteFence = ResyncWriteFence::Failed;
                     if (g_nativeResync && !g_nativeResync->finished)

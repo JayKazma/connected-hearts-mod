@@ -1829,8 +1829,25 @@ int main(int argc, char* argv[]) {
         std::array<kh2coop::PuppetTarget, 2> targets;
         {
             std::lock_guard<std::mutex> lock(replicaMtx);
-            targets = avatarSync.sample(netClient->estimatedServerTimeMs(),
-                                        worldId, roomId);
+            const auto serverNow = netClient->estimatedServerTimeMs();
+            targets = avatarSync.sample(serverNow, worldId, roomId);
+            // Diagnostic (KH2COOP_AVATAR_DIAG=1): why a remote avatar is or is not shown.
+            static const bool avatarDiag = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_AVATAR_DIAG", v, 2) == 1 && v[0] == '1'; }();
+            static std::uint64_t lastDiagMs = 0;
+            if (avatarDiag && GetTickCount64() - lastDiagMs >= 1000) {
+                lastDiagMs = GetTickCount64();
+                const auto owners = avatarSync.puppetOwners();
+                for (int i = 0; i < 2; ++i) {
+                    const auto* p = avatarSync.newestFor(owners[i]);
+                    if (!p) { std::cout << "[avatar-diag] puppet " << i << " owner slot " << owners[i] << ": no pose received\n"; continue; }
+                    const std::int64_t age = static_cast<std::int64_t>(serverNow) - static_cast<std::int64_t>(p->serverTimeMs);
+                    std::cout << "[avatar-diag] puppet " << i << " active=" << (targets[i].active ? 1 : 0)
+                              << " ageMs=" << age << " remote=" << p->worldId << "/" << p->roomId
+                              << " local=" << worldId << "/" << roomId << " flags=" << unsigned(p->flags)
+                              << " pos=(" << p->position.x << "," << p->position.y << "," << p->position.z << ")"
+                              << " motion=" << p->motionId << " seq=" << p->seq << "\n";
+                }
+            }
         }
         for (int i = 0; i < 2; ++i) {
             kh2coop::PuppetPose pose;

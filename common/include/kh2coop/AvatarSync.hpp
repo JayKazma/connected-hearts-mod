@@ -135,6 +135,10 @@ public:
         return out;
     }
 
+    // Diagnostic only: newest admitted pose for a slot (nullptr when none).
+    [[nodiscard]] const AvatarState* newestFor(int slot) const {
+        return (slot < 0 || slot > 2 || admittedIds_[slot] == 0) ? nullptr : interp_[slot].latest();
+    }
     [[nodiscard]] std::uint32_t releaseAfterMs() const {
         return config_.releaseAfterMs > config_.staleAfterMs ? config_.releaseAfterMs : config_.staleAfterMs;
     }

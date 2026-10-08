@@ -1967,7 +1967,13 @@ static void ReadGamepads() {
     // The processed entry at +0x30 had the correct mapping but was DIGITAL
     // (0 or ±1 only). We keep the raw ANALOG values but swap the axes so
     // physical left stick → g_gamepad[0].leftX/Y (movement).
-    if (g_soloTestMode) {
+    // Off by default: on Steam-remapped pads the raw slots are already correct.
+    static const bool kSoloStickSwap =
+        GetEnvironmentVariableA("KH2COOP_SOLO_STICK_SWAP", nullptr, 0) > 0;
+    if (g_soloTestMode && !kSoloStickSwap) {
+        g_gamepad[0].leftY = -g_gamepad[0].leftY;  // raw Y polarity is inverted vs processed
+    }
+    if (g_soloTestMode && kSoloStickSwap) {
         auto& pad = g_gamepad[0];
         float tmpX = pad.leftX;
         float tmpY = pad.leftY;
