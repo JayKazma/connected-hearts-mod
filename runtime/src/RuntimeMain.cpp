@@ -1797,8 +1797,33 @@ int main(int argc, char* argv[]) {
             (void)avatarBridge.ReadLocalDownedState(downed);
             kh2coop::projectLocalDowned(local, downed,
                 {worldSessionGeneration, worldBridge.DeliverySerial(), 0}, GetTickCount64());
+            // Tick-time stamping: the DLL's frame counter (local.seq) advances once per game logic tick
+            // at a steady rate, but this pump observes those ticks with wall-clock jitter (display pacing
+            // at 144 FPS vs 60 Hz logic, sleep granularity). A send-time stamp makes receivers interpolate
+            // uneven speeds (seen as 2..19 units/frame for a steady 8). Stamp each sample at its ideal tick
+            // time instead: anchored to the server clock, tick period learned over 2 s windows, re-anchored
+            // when the ideal clock drifts from now (hitch, rate change), always monotonic.
+            {
+                static std::uint64_t anchorMs = 0, lastStampMs = 0, rateT0 = 0;
+                static std::uint32_t anchorSeq = 0, rateSeq0 = 0;
+                static double tickMs = 1000.0 / 60.0;
+                const std::uint64_t nowMs = netClient->estimatedServerTimeMs();
+                const std::uint32_t frame = local.seq;
+                const auto anchor = [&] { anchorMs = nowMs > lastStampMs ? nowMs : lastStampMs + 1; anchorSeq = frame; };
+                if (anchorMs == 0 || frame < anchorSeq || frame - anchorSeq > 36000) { anchor(); rateT0 = nowMs; rateSeq0 = frame; }
+                if (nowMs - rateT0 >= 2000 && frame > rateSeq0) {
+                    const double measured = static_cast<double>(nowMs - rateT0) / static_cast<double>(frame - rateSeq0);
+                    if (measured > 4.0 && measured < 40.0) tickMs = measured;
+                    rateT0 = nowMs; rateSeq0 = frame;
+                }
+                std::uint64_t ideal = anchorMs + static_cast<std::uint64_t>(static_cast<double>(frame - anchorSeq) * tickMs + 0.5);
+                const std::int64_t drift = static_cast<std::int64_t>(ideal) - static_cast<std::int64_t>(nowMs);
+                if (drift > 40 || drift < -80) { anchor(); ideal = anchorMs; }
+                if (ideal <= lastStampMs) ideal = lastStampMs + 1;
+                lastStampMs = ideal;
+                local.serverTimeMs = ideal;
+            }
             local.seq = 0;
-            local.serverTimeMs = 0; // stamped by sendAvatar
             netClient->sendAvatar(local);
         }
         std::array<kh2coop::PuppetTarget, 2> targets;

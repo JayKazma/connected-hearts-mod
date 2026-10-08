@@ -80,7 +80,9 @@ bool QualifiedRoom(std::uint16_t world, std::uint16_t room, std::uint16_t evt) {
 }
 
 bool RoomAllowed(std::uint16_t world, std::uint16_t room, std::uint16_t evt) {
-    return QualifiedRoom(world, room, evt) || (evt == 0 && world >= 1 && world < 0x20);
+    // One clone: any ordinary world; an attached event program is tolerated (Decide refuses a load
+    // while an event or cutscene is actually active, and a non-DEFAULT row or forced party).
+    return QualifiedRoom(world, room, evt) || (world >= 1 && world < 0x20);
 }
 
 Plan Project(const PartyLayout& layout, std::uint8_t localSlot) {
@@ -361,7 +363,7 @@ Load Decide(const LoadInput& in) {
     const bool oneClone = in.plan == Plan::OneClone;
     if (oneClone ? !RoomAllowed(in.world, in.room, 0) : !QualifiedRoom(in.world, in.room, 0))
         return Load::WorldNotQualified; // two clones: pinned rooms only (GoA 04/1A, 04/0A); evt next
-    if (in.evtProgram != 0) return Load::EventRoom;
+    if (in.evtProgram != 0 && !oneClone) return Load::EventRoom; // one clone: only an ACTIVE event refuses
     if (in.eventContext != 0 || in.cutsceneState != 0) return Load::EventActive;
     // Two clones: the intent is pinned to the room its layout was authored for (lead decision).
     // One clone: the newest accepted layout applies in any allowed room (the row/member checks below gate it).
