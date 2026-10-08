@@ -1093,7 +1093,8 @@ static constexpr uint32_t PUPPET_STALE_FRAMES = 120;
 // fall back to the nearest basic motion instead of risking a bad id.
 static constexpr uint32_t PUPPET_MAX_BASIC_MOTION = 8;
 static constexpr uint32_t PUPPET_CLONE_UNSAFE_MOTION = 9;
-static constexpr float PUPPET_TIME_DRIFT_FRAMES = 2.0f;
+static constexpr float PUPPET_TIME_DRIFT_FRAMES = 3.0f;
+static constexpr float PUPPET_LOOP_WRAP_FRAMES = 20.0f;  // a backward jump this large is the clip looping
 static constexpr uintptr_t ACTOR_MOTCTRL = 0x158;        // embedded motion controller
 static constexpr uintptr_t MOTCTRL_CURRENT_TIME = 0x44;  // float frames
 static constexpr uintptr_t ACTOR_VELOCITY = 0xB98;       // 3 floats
@@ -2554,9 +2555,14 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     }
     // A held pose (VUH-1787) has a frozen motionTime; snapping to it every few
     // frames would stutter, so the clip plays on until it idles or resumes.
-    if (motion == pose.motionId && puppethold::SnapMotionTime(pose.flags) &&
-        std::fabs(*time - pose.motionTime) > PUPPET_TIME_DRIFT_FRAMES) {
-        *time = pose.motionTime;
+    // A looping clip (idle) wraps on the owner before the receiver sees it: the interpolated time
+    // then jumps far backwards once per loop, and snapping to it restarted the clip (idle jitter).
+    // Small drifts snap either way; a large backward jump is a wrap, which the local clip does itself.
+    if (motion == pose.motionId && puppethold::SnapMotionTime(pose.flags)) {
+        const float diff = pose.motionTime - *time;
+        if (diff > PUPPET_TIME_DRIFT_FRAMES || (diff < -PUPPET_TIME_DRIFT_FRAMES && diff > -PUPPET_LOOP_WRAP_FRAMES)) {
+            *time = pose.motionTime;
+        }
     }
 }
 
