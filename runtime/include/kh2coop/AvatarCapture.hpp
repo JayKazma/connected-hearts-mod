@@ -45,6 +45,15 @@ AvatarState captureAvatar(const Reader& mem, std::uint64_t exeBase, std::uint64_
         a.flags |= AvatarInCutscene; // nothing to show: hide the puppet
         return a;
     }
+    // slot0 is the status record vanilla Sora owns. With a clone in the party the first Sora
+    // built (the clone) takes that record and the local player gets another one, so the
+    // player's HP is read from its own actor's record (actor+0x5C0) when that is inside the pool.
+    const std::uint64_t status = mem.template read<std::uint64_t>(actor + 0x5C0);
+    if (status > exeBase && status < exeBase + 0x3000000ULL) {
+        const auto hp = mem.template read<std::int32_t>(status);
+        const auto maxHp = mem.template read<std::int32_t>(status + 4);
+        if (maxHp > 0 && hp >= 0 && hp <= maxHp) { a.hp = hp; a.maxHp = maxHp; }
+    }
 
     const std::uint64_t entity = actor + o::actor::ENTITY_TRANSFORM;
     a.position = {mem.template read<float>(entity + o::entity::POS_X),

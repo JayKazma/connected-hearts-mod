@@ -457,6 +457,15 @@ void testAvatarCapture() {
           "motion id from actor+0x180, time from actor+0x19C");
     check((a.flags & AvatarAirborne) && !(a.flags & AvatarInCutscene), "airborne flag set");
 
+    // The player's own status record wins over slot 0 when the actor has one in the pool
+    // (slot 0 belongs to the first Sora built, the clone, in a one-clone party).
+    m.put<std::uint64_t>(actor + 0x5C0, exe + 0x2A23320ULL);
+    m.put<std::int32_t>(exe + 0x2A23320ULL, 40);
+    m.put<std::int32_t>(exe + 0x2A23324ULL, 120);
+    const auto own = captureAvatar(m, exe, actor, false, false);
+    check(own.hp == 40 && own.maxHp == 120, "HP from the actor's own status record when it has one");
+    m.put<std::uint64_t>(actor + 0x5C0, 0);
+
     const auto noActor = captureAvatar(m, exe, 0, false, false);
     check((noActor.flags & AvatarInCutscene) && noActor.roomId == 0x1A,
           "no actor (loading) -> flagged hidden, room still reported");
