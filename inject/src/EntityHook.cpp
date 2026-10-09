@@ -1261,7 +1261,6 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
         for (int k = 1; k <= 2; ++k) if (table[k] == 0 || table[k] == actor) { index = k; break; }
         if (firstSeen) Log("[gauge] puppet %d clone %p; HUD table 1=%p 2=%p -> index %d", i, reinterpret_cast<void*>(actor), reinterpret_cast<void*>(table[1]), reinterpret_cast<void*>(table[2]), index);
         if (index == 0) return;
-        index = seat + 1;
         reinterpret_cast<void(*)(int, uintptr_t)>(g_exeBase + RVA_HUD_PARTY_SET)(index, actor);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("[gauge] register faulted (puppet %d actor=%p)", i, reinterpret_cast<void*>(actor));
