@@ -1233,7 +1233,12 @@ static void CloneGaugeClear(int i) {
 // Game thread, from the clone's own entity update: the actor is alive this frame.
 static void CloneGaugeRegister(int i, uintptr_t actor) {
     if (!CloneGaugeEnabled() || g_gaugeActor[i] == actor) return;
-    if (g_clones[0] == 0 || (actor != g_clones[0] && actor != g_clones[1])) return; // Sora clones only
+    static unsigned skipLogged = 0;
+    if (!IsPlayerClassActor(actor)) { // Sora clones only: companions register themselves
+        if (skipLogged < 3 && g_gaugeActor[i] != 0) { ++skipLogged; Log("[gauge] puppet %d drives a companion %p; no registration", i, reinterpret_cast<void*>(actor)); }
+        CloneGaugeClear(i);
+        return;
+    }
     CloneGaugeClear(i);
     int index = 0;
     __try {
