@@ -2560,13 +2560,19 @@ static void DrivePuppetMotion(void* actorObj, int index) {
         g_inPuppetAnimSet = false;
         g_inOurAnimSet = false;
         d.lastAnim = static_cast<int>(motion);
+        // Start in phase with the owner; the clip then plays on at the local frame rate.
+        if (motion == pose.motionId && pose.motionTime > 0.0f) *time = pose.motionTime;
     }
     // A held pose (VUH-1787) has a frozen motionTime; snapping to it every few
     // frames would stutter, so the clip plays on until it idles or resumes.
     // A looping clip (idle) wraps on the owner before the receiver sees it: the interpolated time
     // then jumps far backwards once per loop, and snapping to it restarted the clip (idle jitter).
     // Small drifts snap either way; a large backward jump is a wrap, which the local clip does itself.
-    if (motion == pose.motionId && puppethold::SnapMotionTime(pose.flags)) {
+    // Locomotion loops (idle/walk/run) are never re-synced mid-clip: the owner's clip time arrives
+    // sampled at its frame rate and steps back a few frames on stride blends, and chasing it replays
+    // or skips frames (the mid-stride freeze). Their phase carries no gameplay meaning.
+    const bool locomotion = motion == ANIM_IDLE || motion == ANIM_WALK || motion == ANIM_RUN;
+    if (!locomotion && motion == pose.motionId && puppethold::SnapMotionTime(pose.flags)) {
         const float diff = pose.motionTime - *time;
         if (diff > PUPPET_TIME_DRIFT_FRAMES || (diff < -PUPPET_TIME_DRIFT_FRAMES && diff > -PUPPET_LOOP_WRAP_FRAMES)) {
             *time = pose.motionTime;
