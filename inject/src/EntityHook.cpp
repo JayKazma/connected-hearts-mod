@@ -1274,14 +1274,13 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
 
 // Portrait size. GAUGE_FRIEND plays the "face" sequence of the actor's own archive; Sora's
 // sequence only knows the player-sized portrait, which overflows the small friend ring. The
-// gauge's sequence player (gauge+0x50+0x20) has a uniform scale multiplier (0x193310 sets it;
-// the draw applies it on top of the animation's own scale). The gauges are globals
-// (0xABD250 = HUD index 1, 0xABD258 = index 2) rebuilt by the HUD, and both build paths reset
-// the multiplier, so it is re-applied every frame the clone is driven. KH2COOP_CLONE_FACE_SCALE
+// portrait sprite (gauge+0x50) has a scale field (+0x1D0, 1.0 by default) that its update
+// pushes into the sequence player every frame (0x16B3C0 -> 0x1932B0), on top of the animation's
+// own scale. The gauges are globals (0xABD250 = HUD index 1, 0xABD258 = index 2) rebuilt by the
+// HUD, so the field is re-checked every frame the clone is driven. KH2COOP_CLONE_FACE_SCALE
 // overrides the factor (default 0.5).
-static constexpr uintptr_t RVA_GAUGE_FRIEND_PTRS = 0xABD250, RVA_SEQ_SET_SCALE = 0x193310;
-static constexpr uintptr_t RVA_HUD_PARTY_DIRTY = 0xABD000; // uint32_t[3], bit 0 = rebind
-static constexpr uintptr_t GAUGE_ACTOR = 0x40, GAUGE_SEQ_PLAYER = 0x50 + 0x20, SEQ_SCALE = 0x178, SEQ_FLAGS = 0xE8;
+static constexpr uintptr_t RVA_GAUGE_FRIEND_PTRS = 0xABD250;
+static constexpr uintptr_t GAUGE_ACTOR = 0x40, GAUGE_PORTRAIT_SPRITE = 0x50, SPRITE_SCALE = 0x1D0;
 
 static float CloneFaceScale() {
     static const float scale = [] {
@@ -1301,22 +1300,14 @@ static void CloneGaugeKeepPortraitScale(uintptr_t actor, int index) {
     __try {
         const uintptr_t gauge = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_GAUGE_FRIEND_PTRS + static_cast<uintptr_t>(index - 1) * 8);
         if (gauge == 0 || *reinterpret_cast<const uintptr_t*>(gauge + GAUGE_ACTOR) != actor) return;
-        const uintptr_t player = gauge + GAUGE_SEQ_PLAYER;
+        auto* scale = reinterpret_cast<float*>(gauge + GAUGE_PORTRAIT_SPRITE + SPRITE_SCALE);
         const float want = CloneFaceScale();
-        const auto have = *reinterpret_cast<const float*>(player + SEQ_SCALE);
-        const auto flags = *reinterpret_cast<const uint32_t*>(player + SEQ_FLAGS);
-        if (have == want && (flags & 2)) return;
-        reinterpret_cast<void(*)(uintptr_t, float, float, float)>(g_exeBase + RVA_SEQ_SET_SCALE)(player, want, 1.0f, 1.0f);
-        if (logged < 12) {
-            ++logged;
-            const auto dirty = *reinterpret_cast<const uint32_t*>(g_exeBase + RVA_HUD_PARTY_DIRTY + static_cast<uintptr_t>(index) * 4);
-            Log("[gauge] frame %u portrait scale %.2f applied to gauge %d at %p (was %.2f, flags %08X, dirty %08X, anim %d state %d, bound %u/%u)",
-                g_frameCounter, want, index, reinterpret_cast<void*>(gauge), have, flags, dirty,
-                *reinterpret_cast<const int*>(player + 0x158), *reinterpret_cast<const int*>(player + 0x140),
-                *reinterpret_cast<const uint8_t*>(gauge + 0x1700), *reinterpret_cast<const uint8_t*>(gauge + 0x1702));
-        }
+        if (*scale == want) return;
+        const float had = *scale;
+        *scale = want;
+        if (logged < 4) { ++logged; Log("[gauge] frame %u portrait scale %.2f set on gauge %d (was %.2f)", g_frameCounter, want, index, had); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (logged < 6) { ++logged; Log("[gauge] portrait scale faulted (index %d)", index); }
+        if (logged < 4) { ++logged; Log("[gauge] portrait scale faulted (index %d)", index); }
     }
 }
 
