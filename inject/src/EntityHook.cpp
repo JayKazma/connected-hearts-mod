@@ -1233,9 +1233,11 @@ static void CloneGaugeClear(int i) {
 // Game thread, from the clone's own entity update: the actor is alive this frame.
 static void CloneGaugeRegister(int i, uintptr_t actor) {
     if (!CloneGaugeEnabled() || g_gaugeActor[i] == actor) return;
-    static unsigned skipLogged = 0;
+    static uintptr_t seenActor[2] = {0, 0}; // one diagnostic line per actor per puppet
+    const bool firstSeen = seenActor[i] != actor;
+    seenActor[i] = actor;
     if (!IsPlayerClassActor(actor)) { // Sora clones only: companions register themselves
-        if (skipLogged < 3 && g_gaugeActor[i] != 0) { ++skipLogged; Log("[gauge] puppet %d drives a companion %p; no registration", i, reinterpret_cast<void*>(actor)); }
+        if (firstSeen) Log("[gauge] puppet %d drives a non-player-class actor %p; no registration", i, reinterpret_cast<void*>(actor));
         CloneGaugeClear(i);
         return;
     }
@@ -1244,7 +1246,11 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
     __try {
         const int seat = *reinterpret_cast<const int*>(actor + ACTOR_PARTY_SEAT);
         const auto flags = *reinterpret_cast<const uint32_t*>(actor + ACTOR_FLAGS_6C8);
-        if (seat < 0 || seat > 1 || ((flags >> 22) & 1)) return;
+        if (firstSeen) Log("[gauge] puppet %d clone %p seat=%d flags6C8=%08X", i, reinterpret_cast<void*>(actor), seat, flags);
+        if (seat < 0 || seat > 1 || ((flags >> 22) & 1)) {
+            if (firstSeen) Log("[gauge] puppet %d: seat/flags outside the FRIEND path; not registered", i);
+            return;
+        }
         index = seat + 1;
         reinterpret_cast<void(*)(int, uintptr_t)>(g_exeBase + RVA_HUD_PARTY_SET)(index, actor);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
