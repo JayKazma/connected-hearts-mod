@@ -2593,13 +2593,15 @@ static void ApplyPuppetTransform(void* actorObj, int index) {
     const uintptr_t entity = actor + offsets::actor::ENTITY_TRANSFORM;
     if (index == 0 && PuppetTraceBudget() > 0) {
         // flags: AvatarFlags of the driven pose (8 = AvatarHeld, VUH-1787 live fixture).
-        Log("[ptrace] f=%u t=%llu game=(%.1f,%.1f,%.1f) pose=(%.1f,%.1f,%.1f) motion=%u flags=%u",
+        // anim: the clip the puppet is playing and its local clip time next to the owner's clip time.
+        Log("[ptrace] f=%u t=%llu game=(%.1f,%.1f,%.1f) pose=(%.1f,%.1f,%.1f) motion=%u flags=%u anim=%d/%.1f/%.1f",
             g_frameCounter, static_cast<unsigned long long>(GetTickCount64()),
             *reinterpret_cast<float*>(entity + offsets::entity::POS_X),
             *reinterpret_cast<float*>(entity + offsets::entity::POS_Y),
             *reinterpret_cast<float*>(entity + offsets::entity::POS_Z),
             pose.position.x, pose.position.y, pose.position.z, pose.motionId,
-            static_cast<unsigned>(pose.flags));
+            static_cast<unsigned>(pose.flags), g_puppets[index].lastAnim,
+            *reinterpret_cast<float*>(actor + ACTOR_MOTCTRL + MOTCTRL_CURRENT_TIME), pose.motionTime);
     }
     *reinterpret_cast<float*>(entity + offsets::entity::POS_X) = pose.position.x;
     *reinterpret_cast<float*>(entity + offsets::entity::POS_Y) = pose.position.y;
