@@ -1233,7 +1233,7 @@ static void CloneGaugeClear(int i) {
     }
 }
 
-static void CloneGaugeKeepPortraitScale(uintptr_t actor, int index);
+static void CloneGaugeTick(int i, uintptr_t actor, int index);
 
 // Game thread, from the clone's own entity update: the actor is alive this frame.
 static void CloneGaugeRegister(int i, uintptr_t actor) {
@@ -1241,7 +1241,7 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
     if (g_gaugeActor[i] == actor) {
         // Still ours? A companion activating after us writes its own seat into the same entry.
         const auto* table = reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_HUD_PARTY_TABLE);
-        if (table[g_gaugeIndex[i]] == actor) { CloneGaugeKeepPortraitScale(actor, g_gaugeIndex[i]); return; }
+        if (table[g_gaugeIndex[i]] == actor) { CloneGaugeTick(i, actor, g_gaugeIndex[i]); return; }
         Log("[gauge] HUD party index %d taken over by %p; re-registering clone", g_gaugeIndex[i], reinterpret_cast<void*>(table[g_gaugeIndex[i]]));
         g_gaugeActor[i] = 0; g_gaugeIndex[i] = 0; // not ours any more: nothing to clear
     }
@@ -1294,20 +1294,38 @@ static float CloneFaceScale() {
     return scale;
 }
 
-// Game thread. Finds the friend gauge bound to `actor` and keeps its portrait scaled.
-static void CloneGaugeKeepPortraitScale(uintptr_t actor, int index) {
+// Game thread, every frame the clone is driven. Keeps the clone's friend gauge honest:
+//  - portrait scale on the gauge's sprite (see above);
+//  - HP/max HP in the clone's own status record (actor+0x5C0: +0 hp, +4 max), which is what
+//    GAUGE_FRIEND reads. The record is the clone's private one (never the local player's, and
+//    always inside the exe's status pool), filled from the owner's streamed AvatarState. HP is
+//    kept >= 1: the clone must never look dead to the game's own player code.
+static void CloneGaugeTick(int i, uintptr_t actor, int index) {
     static unsigned logged = 0;
     __try {
         const uintptr_t gauge = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_GAUGE_FRIEND_PTRS + static_cast<uintptr_t>(index - 1) * 8);
-        if (gauge == 0 || *reinterpret_cast<const uintptr_t*>(gauge + GAUGE_ACTOR) != actor) return;
-        auto* scale = reinterpret_cast<float*>(gauge + GAUGE_PORTRAIT_SPRITE + SPRITE_SCALE);
-        const float want = CloneFaceScale();
-        if (*scale == want) return;
-        const float had = *scale;
-        *scale = want;
-        if (logged < 4) { ++logged; Log("[gauge] frame %u portrait scale %.2f set on gauge %d (was %.2f)", g_frameCounter, want, index, had); }
+        if (gauge != 0 && *reinterpret_cast<const uintptr_t*>(gauge + GAUGE_ACTOR) == actor) {
+            auto* scale = reinterpret_cast<float*>(gauge + GAUGE_PORTRAIT_SPRITE + SPRITE_SCALE);
+            const float want = CloneFaceScale();
+            if (*scale != want) {
+                const float had = *scale;
+                *scale = want;
+                if (logged < 4) { ++logged; Log("[gauge] frame %u portrait scale %.2f set on gauge %d (was %.2f)", g_frameCounter, want, index, had); }
+            }
+        }
+        const auto& avatar = g_puppets[i].pose.pose;
+        if (avatar.maxHp <= 0 || avatar.maxHp > 100000) return;
+        const auto status = *reinterpret_cast<const uintptr_t*>(actor + 0x5C0);
+        const auto localStatus = g_soraActor ? *reinterpret_cast<const uintptr_t*>(g_soraActor + 0x5C0) : 0;
+        if (status == 0 || status == localStatus || status <= g_exeBase || status >= g_exeBase + 0x3000000) return;
+        auto* hp = reinterpret_cast<std::int32_t*>(status);
+        const std::int32_t wantHp = avatar.hp < 1 ? 1 : (avatar.hp > avatar.maxHp ? avatar.maxHp : avatar.hp);
+        if (hp[0] == wantHp && hp[1] == avatar.maxHp) return;
+        static std::int32_t lastLoggedHp = -1;
+        hp[1] = avatar.maxHp; hp[0] = wantHp;
+        if (logged < 8 && lastLoggedHp != wantHp) { ++logged; lastLoggedHp = wantHp; Log("[gauge] clone hp %d/%d written to record %p (puppet %d)", wantHp, avatar.maxHp, reinterpret_cast<void*>(status), i); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (logged < 4) { ++logged; Log("[gauge] portrait scale faulted (index %d)", index); }
+        if (logged < 8) { ++logged; Log("[gauge] tick faulted (puppet %d index %d)", i, index); }
     }
 }
 
