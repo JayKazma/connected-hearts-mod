@@ -23,11 +23,13 @@
 
 #include "kh2coop/CaptureChannel.hpp"
 #include "CoopHudMailbox.hpp"
+#include "PartnerCard.hpp"
 
 #include <Windows.h>
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <wincodec.h>
 
 #include "MinHook.h"
@@ -60,8 +62,9 @@ constexpr int kPresentVtableIndex = 8;
 constexpr int kPresent1VtableIndex = 22;
 constexpr int kExecuteCommandListsVtableIndex = 10;
 constexpr int kRing = 3;
-constexpr UINT kOverlayWidth = hud::Width;
-constexpr UINT kOverlayHeight = hud::Height;
+// Partner-card overlay: top-left anchored, sized per backbuffer (PartnerCard::LayoutFor); the
+// upload buffers are sized for the largest layout (4K).
+constexpr UINT kOverlayMaxWidth = 1536, kOverlayMaxHeight = 800;
 constexpr UINT kOverlayMargin = 12;
 constexpr UINT64 kOverlayRefreshPresents = 15;
 
@@ -150,12 +153,20 @@ CaptureJob g_job;
 // Overlay text, rendered with GDI into a DIB and converted to the
 // backbuffer's format.
 // All GDI access is serialized and flushed before releasing the Present gate.
-HDC g_overlayDc = nullptr;
-HBITMAP g_overlayBitmap = nullptr;
-HFONT g_overlayFont = nullptr;
-void* g_overlayBits = nullptr;
-std::vector<std::uint8_t> g_overlayPixels;  // kOverlayWidth*4 per row
+std::vector<std::uint8_t> g_overlayPixels;  // layout.width*4 per row, BGRA premultiplied
+partnercard::Layout g_overlayLayout {};
 DXGI_FORMAT g_overlayFormat = DXGI_FORMAT_UNKNOWN;
+bool g_overlayHasContent = false;
+// Alpha-blended overlay draw (one textured quad).
+ID3D12RootSignature* g_blendRoot = nullptr;
+ID3D12PipelineState* g_blendPso = nullptr;
+DXGI_FORMAT g_blendPsoFormat = DXGI_FORMAT_UNKNOWN;
+ID3D12DescriptorHeap* g_srvHeap = nullptr;
+ID3D12DescriptorHeap* g_rtvHeap = nullptr;
+ID3D12Resource* g_overlayTexture = nullptr;
+UINT g_overlayTextureW = 0, g_overlayTextureH = 0;
+D3D12_RESOURCE_STATES g_overlayTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
+bool g_blendFailed = false;
 UINT64 g_overlayLastRefresh = 0;
 bool g_overlayValid = false;
 hud::Mailbox g_hudMailbox; // Process lifetime, never recreated under a callback.
@@ -449,6 +460,7 @@ ID3D12Resource* CreateBuffer(D3D12_HEAP_TYPE heap, UINT64 size,
 }
 
 bool CheckGpuCall(const char* operation, HRESULT result);
+void ReleaseBlend();
 
 // Sets up device objects for a newly seen swapchain. Returns false if this
 // swapchain can't be served (logged once).
@@ -484,6 +496,7 @@ bool PrepareSwapChain(IDXGISwapChain* swapChain) {
 
     if (device != g_device) {
         ReleaseRing();
+        ReleaseBlend();
         if (g_fence) { g_fence->Release(); g_fence = nullptr; }
         if (g_device) g_device->Release();
         g_device = device;
@@ -522,7 +535,7 @@ bool PrepareSwapChain(IDXGISwapChain* swapChain) {
         }
         if (!CheckGpuCall("initial list.Close", ctx.list->Close())) return false;
         const UINT64 uploadSize =
-            static_cast<UINT64>(AlignPitch(kOverlayWidth * 4)) * kOverlayHeight;
+            static_cast<UINT64>(AlignPitch(kOverlayMaxWidth * 4)) * kOverlayMaxHeight;
         ctx.upload = CreateBuffer(D3D12_HEAP_TYPE_UPLOAD, uploadSize,
                                   D3D12_RESOURCE_STATE_GENERIC_READ);
         D3D12_RANGE none {0, 0};
@@ -717,54 +730,6 @@ void DrainCompletedReadbacks() {
     }
 }
 
-bool EnsureOverlayGdi() {
-    if (g_overlayDc) return true;
-    BITMAPINFO info {};
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = kOverlayWidth;
-    info.bmiHeader.biHeight = -static_cast<LONG>(kOverlayHeight);
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    // A NULL source would tie the memory DC's validity to the creating thread.
-    HDC screen = GetDC(nullptr);
-    if (!screen) return false;
-    HDC dc = CreateCompatibleDC(screen);
-    ReleaseDC(nullptr, screen);
-    if (!dc) return false;
-    void* bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-    const HGDIOBJ previous = bitmap && bits ? SelectObject(dc, bitmap) : nullptr;
-    if (!previous || previous == HGDI_ERROR) {
-        GdiFlush();
-        DeleteDC(dc);
-        if (bitmap) DeleteObject(bitmap);
-        return false;
-    }
-    HFONT font = CreateFontW(-22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-                             FIXED_PITCH, L"Consolas");
-    if (font) {
-        const HGDIOBJ oldFont = SelectObject(dc, font);
-        if (!oldFont || oldFont == HGDI_ERROR) { DeleteObject(font); font = nullptr; }
-    }
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 255, 255));
-    if (!GdiFlush()) {
-        DeleteDC(dc);
-        DeleteObject(bitmap);
-        if (font) DeleteObject(font);
-        return false;
-    }
-    // Publish only a complete usable DC/DIB; allocation failure can retry later.
-    g_overlayDc = dc;
-    g_overlayBitmap = bitmap;
-    g_overlayFont = font;
-    g_overlayBits = bits;
-    return true;
-}
-
 void PollCoopHud() {
     hud::Snapshot snapshot;
     const auto nowMs = GetTickCount64();
@@ -774,40 +739,8 @@ void PollCoopHud() {
     g_renderHud = snapshot;
 }
 
-void DrawCoopHudRows() {
-    const auto text = hud::Format(g_renderHud);
-    SetTextColor(g_overlayDc, RGB(170, 170, 170));
-    if (!text.available) {
-        constexpr wchar_t unavailable[] = L"Co-op status unavailable";
-        TextOutW(g_overlayDc, 8, 39, unavailable, static_cast<int>(std::size(unavailable) - 1));
-        return;
-    }
-    for (std::size_t i = 0; i < text.rows.size(); ++i) {
-        const auto& row = text.rows[i];
-        const LONG top = 34 + static_cast<LONG>(i) * 32;
-        const auto draw = [&](const wchar_t* value, LONG left, LONG right) {
-            RECT box {left, top + 5, right, top + 30};
-            DrawTextW(g_overlayDc, value, -1, &box,
-                      DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-        };
-        SetTextColor(g_overlayDc, row.showBar ? RGB(255, 255, 255) : RGB(170, 170, 170));
-        draw(row.label, 8, 190);
-        draw(row.health, 440, 568);
-        draw(row.name[0] ? row.name : row.status, 575, 812);
-        if (row.showBar) {
-            const auto brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-            RECT track {200, top + 14, 420, top + 22};
-            SetDCBrushColor(g_overlayDc, RGB(65, 65, 65));
-            FillRect(g_overlayDc, &track, brush);
-            track.right = track.left + row.fillPixels;
-            SetDCBrushColor(g_overlayDc, row.prompt ? RGB(255, 210, 90)
-                                                    : (row.lowHealth ? RGB(235, 185, 60) : RGB(100, 215, 110)));
-            if (row.fillPixels) FillRect(g_overlayDc, &track, brush);
-        }
-    }
-}
-
-void RefreshOverlayText(DXGI_FORMAT format) {
+// The debug line (kh2ctl overlay on): pid, frame, room, fps, link quality.
+void DebugLine(wchar_t* text, size_t count) {
     LARGE_INTEGER now, freq;
     QueryPerformanceCounter(&now);
     QueryPerformanceFrequency(&freq);
@@ -822,34 +755,178 @@ void RefreshOverlayText(DXGI_FORMAT format) {
         g_fpsWindowStart = now;
         g_fpsWindowPresents = g_presentIndex;
     }
-
-    wchar_t text[192];
     int len = g_renderHud.locationValid
-        ? swprintf_s(text, L"pid %lu  frame %llu  w%02X r%02X  %u fps", GetCurrentProcessId(),
+        ? swprintf_s(text, count, L"pid %lu  frame %llu  w%02X r%02X  %u fps", GetCurrentProcessId(),
                      static_cast<unsigned long long>(g_presentIndex),
                      static_cast<unsigned>(g_renderHud.world), static_cast<unsigned>(g_renderHud.room), g_fps)
-        : swprintf_s(text, L"pid %lu  frame %llu  w-- r--  %u fps", GetCurrentProcessId(),
+        : swprintf_s(text, count, L"pid %lu  frame %llu  w-- r--  %u fps", GetCurrentProcessId(),
                      static_cast<unsigned long long>(g_presentIndex), g_fps);
     // Link quality from the runtime (VUH-1493), once one is connected.
     std::uint32_t rttMs = 0, lossPermille = 0;
     if (len > 0 && enemysync::NetStats(rttMs, lossPermille)) {
-        swprintf_s(text + len, _countof(text) - len, L"  rtt %u ms  loss %u.%u%%", rttMs,
+        swprintf_s(text + len, count - static_cast<size_t>(len), L"  rtt %u ms  loss %u.%u%%", rttMs,
                    lossPermille / 10, lossPermille % 10);
     }
+}
 
-    RECT rect {0, 0, static_cast<LONG>(kOverlayWidth), static_cast<LONG>(kOverlayHeight)};
-    FillRect(g_overlayDc, &rect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-    SetTextColor(g_overlayDc, RGB(255, 255, 255));
-    TextOutW(g_overlayDc, 8, 5, text, static_cast<int>(wcslen(text)));
-    DrawCoopHudRows();
-    GdiFlush();
-
-    const size_t bytes = static_cast<size_t>(kOverlayWidth) * kOverlayHeight * 4;
-    g_overlayPixels.assign(static_cast<const std::uint8_t*>(g_overlayBits),
-                           static_cast<const std::uint8_t*>(g_overlayBits) + bytes);
-    ConvertFromBgra(g_overlayPixels, format);
+// Renders the partner cards (and the debug line when requested) for this backbuffer size.
+bool RefreshOverlay(DXGI_FORMAT format, UINT backbufferWidth, UINT backbufferHeight, bool debugLine) {
+    g_overlayLayout = partnercard::LayoutFor(backbufferWidth, backbufferHeight);
+    g_overlayLayout.width = std::min<unsigned>(g_overlayLayout.width, kOverlayMaxWidth);
+    g_overlayLayout.height = std::min<unsigned>(g_overlayLayout.height, kOverlayMaxHeight);
+    wchar_t text[192] {};
+    if (debugLine) DebugLine(text, _countof(text));
+    if (!partnercard::Draw(g_overlayLayout, g_renderHud, debugLine ? text : nullptr, g_overlayPixels)) return false;
+    g_overlayHasContent = debugLine || partnercard::HasContent(g_renderHud);
     g_overlayFormat = format;
     g_overlayValid = true;
+    return true;
+}
+
+// ---- Alpha-blended overlay draw: a premultiplied BGRA texture over the backbuffer.
+// Shaders compile at runtime through d3dcompiler_47 (shipped with Windows 8.1+).
+typedef HRESULT(WINAPI* D3DCompileFn)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+                                      LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+constexpr char kOverlayShader[] = R"(
+cbuffer C : register(b0) { float4 rect; };
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut VSMain(uint id : SV_VertexID) {
+    float2 uv = float2(id & 1, id >> 1);
+    VSOut o; o.uv = uv;
+    o.pos = float4(rect.x + uv.x * rect.z, rect.y - uv.y * rect.w, 0, 1);
+    return o;
+}
+Texture2D tex : register(t0);
+SamplerState smp : register(s0);
+float4 PSMain(VSOut i) : SV_Target { return tex.Sample(smp, i.uv); }
+)";
+
+bool BlendFail(const char* what, HRESULT hr) {
+    g_blendFailed = true;
+    if (g_log) g_log("[render] overlay blend disabled: %s hr=%08lX", what, hr);
+    return false;
+}
+
+bool EnsureBlendPipeline(DXGI_FORMAT rtvFormat) {
+    if (g_blendFailed) return false;
+    if (!g_blendRoot) {
+        D3D12_DESCRIPTOR_RANGE range {};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
+        D3D12_ROOT_PARAMETER params[2] {};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        params[0].Constants.Num32BitValues = 4;
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = 1;
+        params[1].DescriptorTable.pDescriptorRanges = &range;
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC sampler {};
+        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC desc {};
+        desc.NumParameters = 2; desc.pParameters = params;
+        desc.NumStaticSamplers = 1; desc.pStaticSamplers = &sampler;
+        desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+        auto serialize = d3d12 ? reinterpret_cast<decltype(&D3D12SerializeRootSignature)>(
+            GetProcAddress(d3d12, "D3D12SerializeRootSignature")) : nullptr;
+        if (!serialize) return BlendFail("D3D12SerializeRootSignature", E_FAIL);
+        ID3DBlob* blob = nullptr; ID3DBlob* error = nullptr;
+        HRESULT hr = serialize(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+        if (error) error->Release();
+        if (FAILED(hr)) return BlendFail("SerializeRootSignature", hr);
+        hr = g_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&g_blendRoot));
+        blob->Release();
+        if (FAILED(hr)) return BlendFail("CreateRootSignature", hr);
+    }
+    if (!g_srvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC heap {};
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = 1;
+        heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        HRESULT hr = g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g_srvHeap));
+        if (FAILED(hr)) return BlendFail("CreateDescriptorHeap(srv)", hr);
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        hr = g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g_rtvHeap));
+        if (FAILED(hr)) return BlendFail("CreateDescriptorHeap(rtv)", hr);
+    }
+    if (!g_blendPso || g_blendPsoFormat != rtvFormat) {
+        if (g_blendPso) { g_blendPso->Release(); g_blendPso = nullptr; }
+        HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+        auto compile = compiler ? reinterpret_cast<D3DCompileFn>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+        if (!compile) return BlendFail("d3dcompiler_47", E_FAIL);
+        ID3DBlob* vs = nullptr; ID3DBlob* ps = nullptr; ID3DBlob* error = nullptr;
+        HRESULT hr = compile(kOverlayShader, sizeof(kOverlayShader) - 1, "overlay", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vs, &error);
+        if (error) { error->Release(); error = nullptr; }
+        if (FAILED(hr)) return BlendFail("compile VS", hr);
+        hr = compile(kOverlayShader, sizeof(kOverlayShader) - 1, "overlay", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &ps, &error);
+        if (error) error->Release();
+        if (FAILED(hr)) { vs->Release(); return BlendFail("compile PS", hr); }
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pso {};
+        pso.pRootSignature = g_blendRoot;
+        pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
+        pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
+        pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;            // premultiplied
+        pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pso.SampleMask = UINT_MAX;
+        pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pso.RasterizerState.DepthClipEnable = TRUE;
+        pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pso.NumRenderTargets = 1;
+        pso.RTVFormats[0] = rtvFormat;
+        pso.SampleDesc.Count = 1;
+        hr = g_device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&g_blendPso));
+        vs->Release(); ps->Release();
+        if (FAILED(hr)) return BlendFail("CreateGraphicsPipelineState", hr);
+        g_blendPsoFormat = rtvFormat;
+    }
+    return true;
+}
+
+bool EnsureOverlayTexture(UINT width, UINT height) {
+    if (g_overlayTexture && g_overlayTextureW == width && g_overlayTextureH == height) return true;
+    if (g_overlayTexture) { g_overlayTexture->Release(); g_overlayTexture = nullptr; }
+    D3D12_HEAP_PROPERTIES heap {}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = width; desc.Height = height; desc.DepthOrArraySize = 1; desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+    const HRESULT hr = g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_overlayTexture));
+    if (FAILED(hr)) return BlendFail("CreateCommittedResource(overlay)", hr);
+    g_overlayTextureW = width; g_overlayTextureH = height;
+    g_overlayTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
+    srv.Format = desc.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    g_device->CreateShaderResourceView(g_overlayTexture, &srv, g_srvHeap->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
+// sRGB backbuffers blend in linear space; the view format must match the swapchain's.
+DXGI_FORMAT RtvFormatFor(DXGI_FORMAT backbuffer) {
+    switch (backbuffer) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    default: return backbuffer;
+    }
+}
+
+void ReleaseBlend() {
+    if (g_overlayTexture) { g_overlayTexture->Release(); g_overlayTexture = nullptr; }
+    if (g_blendPso) { g_blendPso->Release(); g_blendPso = nullptr; }
+    if (g_blendRoot) { g_blendRoot->Release(); g_blendRoot = nullptr; }
+    if (g_srvHeap) { g_srvHeap->Release(); g_srvHeap = nullptr; }
+    if (g_rtvHeap) { g_rtvHeap->Release(); g_rtvHeap = nullptr; }
+    g_overlayTextureW = g_overlayTextureH = 0;
 }
 
 void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
@@ -937,19 +1014,21 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
         if (captureFrame) FailJob(CaptureStatus::Unsupported, L"backbuffer format not supported");
         return;
     }
-    drawOverlay = drawOverlay && bbDesc.Width >= kOverlayWidth + kOverlayMargin &&
-                  bbDesc.Height >= kOverlayHeight + kOverlayMargin;
-
+    const bool debugLine = g_channel && g_channel->overlay != 0;
+    drawOverlay = drawOverlay && !g_blendFailed && bbDesc.Width >= 64 && bbDesc.Height >= 64;
     if (drawOverlay &&
         (!g_overlayValid || g_overlayFormat != bbDesc.Format ||
+         g_overlayLayout.width == 0 || partnercard::LayoutFor(static_cast<UINT>(bbDesc.Width), bbDesc.Height).scale != g_overlayLayout.scale ||
          g_presentIndex >= g_overlayLastRefresh + kOverlayRefreshPresents)) {
-        if (!EnsureOverlayGdi()) {
+        if (!RefreshOverlay(bbDesc.Format, static_cast<UINT>(bbDesc.Width), bbDesc.Height, debugLine)) {
             drawOverlay = false;
         } else {
-            RefreshOverlayText(bbDesc.Format);
             g_overlayLastRefresh = g_presentIndex;
         }
     }
+    drawOverlay = drawOverlay && g_overlayHasContent &&
+                  EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) &&
+                  EnsureOverlayTexture(g_overlayLayout.width, g_overlayLayout.height);
 
     if (captureFrame) {
         UINT64 total = 0;
@@ -975,29 +1054,56 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
 
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_PRESENT;
     if (drawOverlay) {
-        const UINT pitch = AlignPitch(kOverlayWidth * 4);
-        for (UINT y = 0; y < kOverlayHeight; ++y) {
+        // Upload the overlay pixels into the texture, then blend one quad at the screen's top-left.
+        const UINT ow = g_overlayLayout.width, oh = g_overlayLayout.height;
+        const UINT pitch = AlignPitch(ow * 4);
+        for (UINT y = 0; y < oh; ++y) {
             std::memcpy(ctx.uploadPtr + static_cast<size_t>(y) * pitch,
-                        g_overlayPixels.data() + static_cast<size_t>(y) * kOverlayWidth * 4,
-                        kOverlayWidth * 4);
+                        g_overlayPixels.data() + static_cast<size_t>(y) * ow * 4, ow * 4);
         }
-        Transition(ctx.list, backbuffer, state, D3D12_RESOURCE_STATE_COPY_DEST);
-        state = D3D12_RESOURCE_STATE_COPY_DEST;
-
+        if (g_overlayTextureState != D3D12_RESOURCE_STATE_COPY_DEST) {
+            Transition(ctx.list, g_overlayTexture, g_overlayTextureState, D3D12_RESOURCE_STATE_COPY_DEST);
+            g_overlayTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
         D3D12_TEXTURE_COPY_LOCATION dst {};
-        dst.pResource = backbuffer;
+        dst.pResource = g_overlayTexture;
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION src {};
         src.pResource = ctx.upload;
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint.Offset = 0;
-        src.PlacedFootprint.Footprint.Format = bbDesc.Format;
-        src.PlacedFootprint.Footprint.Width = kOverlayWidth;
-        src.PlacedFootprint.Footprint.Height = kOverlayHeight;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width = ow;
+        src.PlacedFootprint.Footprint.Height = oh;
         src.PlacedFootprint.Footprint.Depth = 1;
         src.PlacedFootprint.Footprint.RowPitch = pitch;
-        ctx.list->CopyTextureRegion(&dst, kOverlayMargin, kOverlayMargin, 0, &src, nullptr);
+        ctx.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        Transition(ctx.list, g_overlayTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        g_overlayTextureState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        Transition(ctx.list, backbuffer, state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        D3D12_RENDER_TARGET_VIEW_DESC rtv {};
+        rtv.Format = RtvFormatFor(bbDesc.Format);
+        rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        const auto rtvHandle = g_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        g_device->CreateRenderTargetView(backbuffer, &rtv, rtvHandle);
+        ctx.list->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+        D3D12_VIEWPORT viewport {0.0f, 0.0f, static_cast<float>(bbDesc.Width), static_cast<float>(bbDesc.Height), 0.0f, 1.0f};
+        D3D12_RECT scissor {0, 0, static_cast<LONG>(bbDesc.Width), static_cast<LONG>(bbDesc.Height)};
+        ctx.list->RSSetViewports(1, &viewport);
+        ctx.list->RSSetScissorRects(1, &scissor);
+        ctx.list->SetPipelineState(g_blendPso);
+        ctx.list->SetGraphicsRootSignature(g_blendRoot);
+        ID3D12DescriptorHeap* heaps[] = {g_srvHeap};
+        ctx.list->SetDescriptorHeaps(1, heaps);
+        ctx.list->SetGraphicsRootDescriptorTable(1, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
+        const float rect[4] = {-1.0f, 1.0f, 2.0f * static_cast<float>(ow) / static_cast<float>(bbDesc.Width),
+                               2.0f * static_cast<float>(oh) / static_cast<float>(bbDesc.Height)};
+        ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
+        ctx.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx.list->DrawInstanced(4, 1, 0, 0);
     }
 
     if (captureFrame) {
@@ -1060,7 +1166,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
             g_job.issued < g_job.frameCount) {
             captureFrame = (g_presentIndex - g_job.startPresent) % g_job.interval == 0;
         }
-        const bool drawOverlay = g_channel->overlay != 0;
+        const bool drawOverlay = g_channel->overlay != 0 || partnercard::HasContent(g_renderHud);
         if (drawOverlay || captureFrame) SubmitFrameWork(drawOverlay, captureFrame);
     }
 
@@ -1137,11 +1243,7 @@ void OnPresentEntry(int hook, IDXGISwapChain* swapChain, UINT flags) {
         if (g_disabled && g_log) g_log("  Render: exception in the Present hook; capture disabled");
         ++g_presentIndex;
     } __finally {
-        __try {
-            if (g_overlayDc) GdiFlush();
-        } __finally {
-            g_renderOwner.store(0);
-        }
+        g_renderOwner.store(0);
     }
 }
 

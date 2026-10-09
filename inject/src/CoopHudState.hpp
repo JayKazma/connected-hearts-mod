@@ -23,6 +23,10 @@ struct Member {
     bool hpValid {};
     std::int32_t hp {}, maxHp {};
     hudnames::Name name {};
+    // Partner card (RenderHook): MP, downed, and the room of a partner seen elsewhere.
+    bool mpValid {}, downed {}, away {};
+    std::int32_t mp {}, maxMp {};
+    std::uint16_t awayWorld {}, awayRoom {};
 };
 struct Snapshot {
     std::uint64_t sampledAtMs {}, namesSampledAtMs {};
@@ -69,6 +73,9 @@ inline bool ValidHp(std::int32_t hp, std::int32_t maxHp) noexcept {
 inline void SetHp(Member& row, const AvatarState& avatar) noexcept {
     row.hpValid = ValidHp(avatar.hp, avatar.maxHp);
     if (row.hpValid) { row.hp = avatar.hp; row.maxHp = avatar.maxHp; }
+    row.mpValid = ValidHp(avatar.mp, avatar.maxMp);
+    if (row.mpValid) { row.mp = avatar.mp; row.maxMp = avatar.maxMp; }
+    row.downed = (avatar.flags & AvatarDowned) != 0;
 }
 
 // Pure projection. No pointers, game reads, allocation, formatting or publication.
@@ -100,9 +107,12 @@ inline Snapshot Project(const Input& in, std::uint64_t nowMs, std::uint32_t fram
         const auto& avatar = remote.avatar;
         const auto slot = static_cast<std::uint8_t>(avatar.ownerSlot);
         if (!remote.active || !ValidPuppetProvenance(remote.provenance, slot, i, authority) ||
-            avatar.worldId != out.world || avatar.roomId != out.room ||
             (avatar.flags & AvatarInCutscene)) continue;
         auto& row = out.members[slot]; // Provenance validator bounded and mapped slot above.
+        if (avatar.worldId != out.world || avatar.roomId != out.room) {
+            row.away = true; row.awayWorld = avatar.worldId; row.awayRoom = avatar.roomId; // stays Waiting
+            continue;
+        }
         row.state = RowState::Available;
         SetHp(row, avatar);
     }
@@ -131,7 +141,10 @@ inline bool SameDisplayScope(const Snapshot& a, const Snapshot& b) noexcept {
     for (std::size_t i = 0; i < 3; ++i)
         if (a.members[i].connectionId != b.members[i].connectionId ||
             a.members[i].state != b.members[i].state || a.members[i].hpValid != b.members[i].hpValid ||
-            a.members[i].name != b.members[i].name)
+            a.members[i].name != b.members[i].name || a.members[i].hp != b.members[i].hp ||
+            a.members[i].maxHp != b.members[i].maxHp || a.members[i].mp != b.members[i].mp ||
+            a.members[i].downed != b.members[i].downed || a.members[i].away != b.members[i].away ||
+            a.members[i].awayWorld != b.members[i].awayWorld)
             return false;
     return true;
 }
