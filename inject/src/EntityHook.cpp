@@ -1314,9 +1314,18 @@ static void CloneGaugeTick(int i, uintptr_t actor, int index) {
             }
         }
         const auto& avatar = g_puppets[i].pose.pose;
-        if (avatar.maxHp <= 0 || avatar.maxHp > 100000) return;
         const auto status = *reinterpret_cast<const uintptr_t*>(actor + 0x5C0);
         const auto localStatus = g_soraActor ? *reinterpret_cast<const uintptr_t*>(g_soraActor + 0x5C0) : 0;
+        static uintptr_t diagActor = 0;
+        if (diagActor != actor && avatar.seq != 0) {
+            diagActor = actor;
+            Log("[gauge] hp diag: owner hp %d/%d seq %u; clone status %p (hp %d/%d) local status %p (hp %d/%d)",
+                avatar.hp, avatar.maxHp, avatar.seq, reinterpret_cast<void*>(status),
+                status ? *reinterpret_cast<const std::int32_t*>(status) : -1, status ? *reinterpret_cast<const std::int32_t*>(status + 4) : -1,
+                reinterpret_cast<void*>(localStatus),
+                localStatus ? *reinterpret_cast<const std::int32_t*>(localStatus) : -1, localStatus ? *reinterpret_cast<const std::int32_t*>(localStatus + 4) : -1);
+        }
+        if (avatar.maxHp <= 0 || avatar.maxHp > 100000) return;
         if (status == 0 || status == localStatus || status <= g_exeBase || status >= g_exeBase + 0x3000000) return;
         auto* hp = reinterpret_cast<std::int32_t*>(status);
         const std::int32_t wantHp = avatar.hp < 1 ? 1 : (avatar.hp > avatar.maxHp ? avatar.maxHp : avatar.hp);
