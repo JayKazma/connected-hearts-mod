@@ -1270,6 +1270,40 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
     Log("[gauge] registered clone %p as HUD party index %d (puppet %d)", reinterpret_cast<void*>(actor), index, i);
 }
 
+// Portrait size. GAUGE_FRIEND plays the "face" sequence of the actor's own archive; Sora's
+// sequence only knows the player-sized portrait, which overflows the small friend ring. The
+// sequence player (gauge+0x50+0x20) has a uniform scale multiplier (0x193310 sets it, applied on
+// top of the animation's own scale), so the clone's portrait is scaled down after the game
+// binds it (0x17EB30 = portrait setup: gauge+0x50, actor, HUD index). KH2COOP_CLONE_FACE_SCALE
+// overrides the factor (default 0.5).
+static constexpr uintptr_t RVA_GAUGE_PORTRAIT_SETUP = 0x17EB30, RVA_SEQ_SET_SCALE = 0x193310;
+static constexpr uint8_t kGaugePortraitSetupBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x41};
+using PFN_GaugePortraitSetup = void(*)(uintptr_t, uintptr_t, int);
+static PFN_GaugePortraitSetup g_origGaugePortraitSetup = nullptr;
+
+static float CloneFaceScale() {
+    static const float scale = [] {
+        char v[16] {};
+        if (GetEnvironmentVariableA("KH2COOP_CLONE_FACE_SCALE", v, sizeof(v)) > 0) {
+            const float f = static_cast<float>(std::atof(v));
+            if (f > 0.05f && f <= 2.0f) return f;
+        }
+        return 0.5f;
+    }();
+    return scale;
+}
+
+static void HookedGaugePortraitSetup(uintptr_t portrait, uintptr_t actor, int index) {
+    g_origGaugePortraitSetup(portrait, actor, index);
+    if (actor == 0 || (actor != g_gaugeActor[0] && actor != g_gaugeActor[1])) return;
+    __try {
+        reinterpret_cast<void(*)(uintptr_t, float, float, float)>(g_exeBase + RVA_SEQ_SET_SCALE)(portrait + 0x20, CloneFaceScale(), 1.0f, 1.0f);
+        Log("[gauge] clone portrait bound at HUD index %d, scale %.2f", index, CloneFaceScale());
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[gauge] portrait scale faulted (index %d)", index);
+    }
+}
+
 static std::uint32_t PlayerClassObjectId(uintptr_t actor) {
     if (!actor) return 0;
     const auto obj = *reinterpret_cast<const uintptr_t*>(actor + offsets::actor::OBJENTRY_PTR);
@@ -3535,6 +3569,20 @@ bool Initialize(uintptr_t exeBase) {
         } else {
             Log("  WARNING: MotionChainSetAnim hook failed: %d (%s) — animation may not match stick",
                 mhStatus, MH_StatusToString(mhStatus));
+        }
+    }
+
+    // Clone portrait scale (see HookedGaugePortraitSetup). Optional.
+    {
+        void* addr = reinterpret_cast<void*>(exeBase + RVA_GAUGE_PORTRAIT_SETUP);
+        if (std::memcmp(addr, kGaugePortraitSetupBytes, sizeof(kGaugePortraitSetupBytes)) == 0) {
+            MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&HookedGaugePortraitSetup),
+                                         reinterpret_cast<void**>(&g_origGaugePortraitSetup));
+            if (st == MH_OK) st = MH_EnableHook(addr);
+            if (st == MH_OK) Log("  GaugePortraitSetup hook installed at RVA 0x%llX", static_cast<unsigned long long>(RVA_GAUGE_PORTRAIT_SETUP));
+            else Log("  WARNING: GaugePortraitSetup hook failed: %d (%s); clone portrait stays full size", st, MH_StatusToString(st));
+        } else {
+            Log("  WARNING: GaugePortraitSetup bytes don't match; clone portrait stays full size");
         }
     }
 
