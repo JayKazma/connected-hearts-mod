@@ -56,6 +56,8 @@ void ConfirmLocalReadiness(bool resolverHookInstalled, ReadyProbe neutralInputCo
 // 2 while the last area load applied TwoClones and members 1/2 still hold Sora; 1 while it applied
 // OneClone and member 1 still holds Sora; otherwise 0. Read by NativePrivateStatus on the game thread.
 unsigned AppliedClones();
+// Two players: the puppet index of the one connected other player (the clone's owner), or -1.
+int PresentPuppetIndex();
 // One-clone mode's room predicate (pure policy; defined with the policy code).
 bool RoomAllowed(std::uint16_t world, std::uint16_t room, std::uint16_t evt);
 // Party kits (KH2COOP_PARTY_KITS=1 accepted at Install): per-seat kits are on for this machine.

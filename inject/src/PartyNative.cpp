@@ -924,6 +924,15 @@ std::uint16_t PuppetKit(int index) {
     return index == 0 ? m1 : m2;
 }
 
+// Two players: the puppet index of the one connected other player (the clone's owner), or -1.
+int PresentPuppetIndex() {
+    if (AppliedClones() != 1 || g_kitsSlot > 2) return -1;
+    const auto o = OtherSlots(g_kitsSlot); int found = -1;
+    for (int i = 0; i < 2; ++i)
+        if (o[static_cast<unsigned>(i)] < 3 && g_kitsRoster[o[static_cast<unsigned>(i)]]) { if (found >= 0) return -1; found = i; }
+    return found;
+}
+
 void NoteRemoteKit(int index, std::uint8_t roster) {
     if (index < 0 || index > 1 || !KitsActive()) return;
     auto& k = g_remoteKits;
