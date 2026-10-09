@@ -735,7 +735,21 @@ void PollCoopHud() {
     const auto nowMs = GetTickCount64();
     (void)g_hudMailbox.TryCopy(nowMs, snapshot);
     hud::ExpireNames(snapshot, nowMs);
-    if (!hud::SameDisplayScope(snapshot, g_renderHud)) g_overlayValid = false;
+    if (!hud::SameDisplayScope(snapshot, g_renderHud)) {
+        g_overlayValid = false;
+        static unsigned logged = 0;
+        if (g_log && logged < 40) { // HUD scope changes (diagnostic, bounded)
+            ++logged;
+            g_log("[hud] network=%d slot=%u room=%02X/%02X members=%llu:%u/%llu:%u/%llu:%u away=%d%d%d content=%d",
+                  snapshot.networkCurrent ? 1 : 0, static_cast<unsigned>(snapshot.localSlot),
+                  static_cast<unsigned>(snapshot.world), static_cast<unsigned>(snapshot.room),
+                  static_cast<unsigned long long>(snapshot.members[0].connectionId), static_cast<unsigned>(snapshot.members[0].state),
+                  static_cast<unsigned long long>(snapshot.members[1].connectionId), static_cast<unsigned>(snapshot.members[1].state),
+                  static_cast<unsigned long long>(snapshot.members[2].connectionId), static_cast<unsigned>(snapshot.members[2].state),
+                  snapshot.members[0].away ? 1 : 0, snapshot.members[1].away ? 1 : 0, snapshot.members[2].away ? 1 : 0,
+                  partnercard::HasContent(snapshot) ? 1 : 0);
+        }
+    }
     g_renderHud = snapshot;
 }
 
@@ -1104,6 +1118,8 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
         ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
         ctx.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         ctx.list->DrawInstanced(4, 1, 0, 0);
+        static bool drawLogged = false;
+        if (!drawLogged && g_log) { drawLogged = true; g_log("[hud] first overlay draw %ux%u scale=%.2f on %llux%u", ow, oh, g_overlayLayout.scale, static_cast<unsigned long long>(bbDesc.Width), bbDesc.Height); }
     }
 
     if (captureFrame) {
