@@ -1209,7 +1209,7 @@ static void NoteActorForClones(uintptr_t actor) {
 // activate never registers, so it had no gauge. We register the clone we drive and clear it before
 // any transition. KH2COOP_CLONE_GAUGE=0 turns this off.
 static constexpr uintptr_t RVA_HUD_PARTY_SET = 0x168850, RVA_HUD_PARTY_CLEAR = 0x168970;
-static constexpr uintptr_t ACTOR_PARTY_SEAT = 0xDD0, ACTOR_FLAGS_6C8 = 0x6C8;
+static constexpr uintptr_t RVA_HUD_PARTY_TABLE = 0xABCFE8; // uintptr_t[3]: [0] player, [1..2] friends
 static uintptr_t g_gaugeActor[2] = {0, 0};
 static int g_gaugeIndex[2] = {0, 0}; // HUD table index (seat + 1) registered for puppet i
 
@@ -1221,8 +1221,11 @@ static bool CloneGaugeEnabled() {
 static void CloneGaugeClear(int i) {
     if (g_gaugeActor[i] == 0) return;
     const int index = g_gaugeIndex[i];
+    const auto actor = g_gaugeActor[i];
     g_gaugeActor[i] = 0; g_gaugeIndex[i] = 0;
     __try {
+        const auto* table = reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_HUD_PARTY_TABLE);
+        if (table[index] != actor) return; // a companion owns the entry now; leave it
         reinterpret_cast<void(*)(int)>(g_exeBase + RVA_HUD_PARTY_CLEAR)(index);
         Log("[gauge] cleared HUD party index %d (puppet %d)", index, i);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1232,7 +1235,14 @@ static void CloneGaugeClear(int i) {
 
 // Game thread, from the clone's own entity update: the actor is alive this frame.
 static void CloneGaugeRegister(int i, uintptr_t actor) {
-    if (!CloneGaugeEnabled() || g_gaugeActor[i] == actor) return;
+    if (!CloneGaugeEnabled()) return;
+    if (g_gaugeActor[i] == actor) {
+        // Still ours? A companion activating after us writes its own seat into the same entry.
+        const auto* table = reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_HUD_PARTY_TABLE);
+        if (table[g_gaugeIndex[i]] == actor) return;
+        Log("[gauge] HUD party index %d taken over by %p; re-registering clone", g_gaugeIndex[i], reinterpret_cast<void*>(table[g_gaugeIndex[i]]));
+        g_gaugeActor[i] = 0; g_gaugeIndex[i] = 0; // not ours any more: nothing to clear
+    }
     static uintptr_t seenActor[2] = {0, 0}; // one diagnostic line per actor per puppet
     const bool firstSeen = seenActor[i] != actor;
     seenActor[i] = actor;
@@ -1244,13 +1254,13 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
     CloneGaugeClear(i);
     int index = 0;
     __try {
-        const int seat = *reinterpret_cast<const int*>(actor + ACTOR_PARTY_SEAT);
-        const auto flags = *reinterpret_cast<const uint32_t*>(actor + ACTOR_FLAGS_6C8);
-        if (firstSeen) Log("[gauge] puppet %d clone %p seat=%d flags6C8=%08X", i, reinterpret_cast<void*>(actor), seat, flags);
-        if (seat < 0 || seat > 1 || ((flags >> 22) & 1)) {
-            if (firstSeen) Log("[gauge] puppet %d: seat/flags outside the FRIEND path; not registered", i);
-            return;
-        }
+        // A PLAYER-class actor has no party seat at +0xDD0 (garbage there); take the first free
+        // friend entry of the HUD table instead. A companion that activates later writes its own
+        // seat+1, which may overwrite ours; the per-frame check below re-registers elsewhere then.
+        const auto* table = reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_HUD_PARTY_TABLE);
+        for (int k = 1; k <= 2; ++k) if (table[k] == 0 || table[k] == actor) { index = k; break; }
+        if (firstSeen) Log("[gauge] puppet %d clone %p; HUD table 1=%p 2=%p -> index %d", i, reinterpret_cast<void*>(actor), reinterpret_cast<void*>(table[1]), reinterpret_cast<void*>(table[2]), index);
+        if (index == 0) return;
         index = seat + 1;
         reinterpret_cast<void(*)(int, uintptr_t)>(g_exeBase + RVA_HUD_PARTY_SET)(index, actor);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
