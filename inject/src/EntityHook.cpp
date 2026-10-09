@@ -2649,6 +2649,7 @@ static int PuppetTraceBudget() {
 static void ApplyPuppetTransform(void* actorObj, int index) {
     if (!IsPuppetActive(index) || PuppetTarget(index) != reinterpret_cast<uintptr_t>(actorObj)) return;
     BindPuppetDrive(index, reinterpret_cast<uintptr_t>(actorObj));
+    CloneGaugeRegister(index, reinterpret_cast<uintptr_t>(actorObj)); // Sora clones drive from here
     const auto& pose = g_puppets[index].pose.pose;
     const auto actor = reinterpret_cast<uintptr_t>(actorObj);
     const uintptr_t entity = actor + offsets::actor::ENTITY_TRANSFORM;
