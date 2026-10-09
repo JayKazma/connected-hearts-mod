@@ -1233,13 +1233,15 @@ static void CloneGaugeClear(int i) {
     }
 }
 
+static void CloneGaugeKeepPortraitScale(uintptr_t actor, int index);
+
 // Game thread, from the clone's own entity update: the actor is alive this frame.
 static void CloneGaugeRegister(int i, uintptr_t actor) {
     if (!CloneGaugeEnabled()) return;
     if (g_gaugeActor[i] == actor) {
         // Still ours? A companion activating after us writes its own seat into the same entry.
         const auto* table = reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_HUD_PARTY_TABLE);
-        if (table[g_gaugeIndex[i]] == actor) return;
+        if (table[g_gaugeIndex[i]] == actor) { CloneGaugeKeepPortraitScale(actor, g_gaugeIndex[i]); return; }
         Log("[gauge] HUD party index %d taken over by %p; re-registering clone", g_gaugeIndex[i], reinterpret_cast<void*>(table[g_gaugeIndex[i]]));
         g_gaugeActor[i] = 0; g_gaugeIndex[i] = 0; // not ours any more: nothing to clear
     }
@@ -1272,14 +1274,13 @@ static void CloneGaugeRegister(int i, uintptr_t actor) {
 
 // Portrait size. GAUGE_FRIEND plays the "face" sequence of the actor's own archive; Sora's
 // sequence only knows the player-sized portrait, which overflows the small friend ring. The
-// sequence player (gauge+0x50+0x20) has a uniform scale multiplier (0x193310 sets it, applied on
-// top of the animation's own scale), so the clone's portrait is scaled down after the game
-// binds it (0x17EB30 = portrait setup: gauge+0x50, actor, HUD index). KH2COOP_CLONE_FACE_SCALE
+// gauge's sequence player (gauge+0x50+0x20) has a uniform scale multiplier (0x193310 sets it;
+// the draw applies it on top of the animation's own scale). The gauges are globals
+// (0xABD250 = HUD index 1, 0xABD258 = index 2) rebuilt by the HUD, and both build paths reset
+// the multiplier, so it is re-applied every frame the clone is driven. KH2COOP_CLONE_FACE_SCALE
 // overrides the factor (default 0.5).
-static constexpr uintptr_t RVA_GAUGE_PORTRAIT_SETUP = 0x17EB30, RVA_SEQ_SET_SCALE = 0x193310;
-static constexpr uint8_t kGaugePortraitSetupBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x41};
-using PFN_GaugePortraitSetup = void(*)(uintptr_t, uintptr_t, int);
-static PFN_GaugePortraitSetup g_origGaugePortraitSetup = nullptr;
+static constexpr uintptr_t RVA_GAUGE_FRIEND_PTRS = 0xABD250, RVA_SEQ_SET_SCALE = 0x193310;
+static constexpr uintptr_t GAUGE_ACTOR = 0x40, GAUGE_SEQ_PLAYER = 0x50 + 0x20, SEQ_SCALE = 0x178, SEQ_FLAGS = 0xE8;
 
 static float CloneFaceScale() {
     static const float scale = [] {
@@ -1293,14 +1294,21 @@ static float CloneFaceScale() {
     return scale;
 }
 
-static void HookedGaugePortraitSetup(uintptr_t portrait, uintptr_t actor, int index) {
-    g_origGaugePortraitSetup(portrait, actor, index);
-    if (actor == 0 || (actor != g_gaugeActor[0] && actor != g_gaugeActor[1])) return;
+// Game thread. Finds the friend gauge bound to `actor` and keeps its portrait scaled.
+static void CloneGaugeKeepPortraitScale(uintptr_t actor, int index) {
+    static unsigned logged = 0;
     __try {
-        reinterpret_cast<void(*)(uintptr_t, float, float, float)>(g_exeBase + RVA_SEQ_SET_SCALE)(portrait + 0x20, CloneFaceScale(), 1.0f, 1.0f);
-        Log("[gauge] clone portrait bound at HUD index %d, scale %.2f", index, CloneFaceScale());
+        const uintptr_t gauge = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_GAUGE_FRIEND_PTRS + static_cast<uintptr_t>(index - 1) * 8);
+        if (gauge == 0 || *reinterpret_cast<const uintptr_t*>(gauge + GAUGE_ACTOR) != actor) return;
+        const uintptr_t player = gauge + GAUGE_SEQ_PLAYER;
+        const float want = CloneFaceScale();
+        const auto have = *reinterpret_cast<const float*>(player + SEQ_SCALE);
+        const auto flags = *reinterpret_cast<const uint32_t*>(player + SEQ_FLAGS);
+        if (have == want && (flags & 2)) return;
+        reinterpret_cast<void(*)(uintptr_t, float, float, float)>(g_exeBase + RVA_SEQ_SET_SCALE)(player, want, 1.0f, 1.0f);
+        if (logged < 6) { ++logged; Log("[gauge] portrait scale %.2f applied to gauge %d (was %.2f, flags %08X)", want, index, have, flags); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("[gauge] portrait scale faulted (index %d)", index);
+        if (logged < 6) { ++logged; Log("[gauge] portrait scale faulted (index %d)", index); }
     }
 }
 
@@ -3569,20 +3577,6 @@ bool Initialize(uintptr_t exeBase) {
         } else {
             Log("  WARNING: MotionChainSetAnim hook failed: %d (%s) — animation may not match stick",
                 mhStatus, MH_StatusToString(mhStatus));
-        }
-    }
-
-    // Clone portrait scale (see HookedGaugePortraitSetup). Optional.
-    {
-        void* addr = reinterpret_cast<void*>(exeBase + RVA_GAUGE_PORTRAIT_SETUP);
-        if (std::memcmp(addr, kGaugePortraitSetupBytes, sizeof(kGaugePortraitSetupBytes)) == 0) {
-            MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&HookedGaugePortraitSetup),
-                                         reinterpret_cast<void**>(&g_origGaugePortraitSetup));
-            if (st == MH_OK) st = MH_EnableHook(addr);
-            if (st == MH_OK) Log("  GaugePortraitSetup hook installed at RVA 0x%llX", static_cast<unsigned long long>(RVA_GAUGE_PORTRAIT_SETUP));
-            else Log("  WARNING: GaugePortraitSetup hook failed: %d (%s); clone portrait stays full size", st, MH_StatusToString(st));
-        } else {
-            Log("  WARNING: GaugePortraitSetup bytes don't match; clone portrait stays full size");
         }
     }
 
