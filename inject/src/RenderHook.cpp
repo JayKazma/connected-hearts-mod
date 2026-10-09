@@ -790,8 +790,12 @@ bool RefreshOverlay(DXGI_FORMAT format, UINT backbufferWidth, UINT backbufferHei
     g_overlayLayout.height = std::min<unsigned>(g_overlayLayout.height, kOverlayMaxHeight);
     wchar_t text[192] {};
     if (debugLine) DebugLine(text, _countof(text));
-    if (!partnercard::Draw(g_overlayLayout, g_renderHud, debugLine ? text : nullptr, g_overlayPixels)) return false;
-    g_overlayHasContent = debugLine || partnercard::HasContent(g_renderHud);
+    static const bool cardOn = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_PARTNER_CARD", v, 2) == 1 && v[0] == '1'; }();
+    hud::Snapshot shown = g_renderHud;
+    if (!cardOn) shown.networkCurrent = false; // debug line only
+    if (!partnercard::Draw(g_overlayLayout, shown, debugLine ? text : nullptr, g_overlayPixels)) return false;
+    static const bool cardEnabled = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_PARTNER_CARD", v, 2) == 1 && v[0] == '1'; }();
+    g_overlayHasContent = debugLine || (cardEnabled && partnercard::HasContent(g_renderHud));
     g_overlayFormat = format;
     g_overlayValid = true;
     return true;
@@ -1182,7 +1186,10 @@ void OnPresent(IDXGISwapChain* swapChain) {
             g_job.issued < g_job.frameCount) {
             captureFrame = (g_presentIndex - g_job.startPresent) % g_job.interval == 0;
         }
-        const bool drawOverlay = g_channel->overlay != 0 || partnercard::HasContent(g_renderHud);
+        // The drawn partner card is off by default (the native party gauge shows the clone instead);
+        // KH2COOP_PARTNER_CARD=1 turns it on.
+        static const bool cardEnabled = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_PARTNER_CARD", v, 2) == 1 && v[0] == '1'; }();
+        const bool drawOverlay = g_channel->overlay != 0 || (cardEnabled && partnercard::HasContent(g_renderHud));
         if (drawOverlay || captureFrame) SubmitFrameWork(drawOverlay, captureFrame);
     }
 

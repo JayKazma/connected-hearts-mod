@@ -594,6 +594,7 @@ static int ApplyStatDeltaBody(void* actor, int delta, int idx, int reactFlag) {
 }
 
 static void ReleaseDownedSpectate();
+static void CloneGaugeClear(int i);
 #include "DownedSpike.inl"
 
 static int __fastcall HookedApplyStatDelta(void* actor, int delta, int idx, int reactFlag) {
@@ -1141,6 +1142,7 @@ static bool IsPuppetActive(int index) {
 // warp's transition observer: game thread, inside the requesting entity update.
 static void PublishLocalForTransition() {
     ReleaseDownedSpectate(); // no spectator selection may survive even a same-room retry
+    CloneGaugeClear(0); CloneGaugeClear(1); // the clone dies with the room; the HUD must not keep it
     if (!g_avatarBridge.IsOpen()) return;
     if (const auto flagged = g_localAvatar.OnTransition(g_frameCounter)) g_avatarBridge.PublishLocal(*flagged);
 }
@@ -1195,6 +1197,57 @@ static void NoteActorForClones(uintptr_t actor) {
         }
         g_clonesNow[g_cloneCountNow++] = actor;
     }
+}
+
+// ============================================================================
+// Clone party gauge (the game's own friend HUD)
+// ============================================================================
+// FRIEND-class actors register with the HUD's party table from their activate virtual
+// (0x3C35C0 -> 0x168850 set / 0x168970 clear; index = actor+0xDD0 (party seat) + 1, skipped while
+// actor+0x6C8 bit 22 is set). GAUGE_FRIEND then draws HP from the actor's status record and the
+// portrait from the "face" entry of the actor's own archive. A Sora clone is PLAYER-class, whose
+// activate never registers, so it had no gauge. We register the clone we drive and clear it before
+// any transition. KH2COOP_CLONE_GAUGE=0 turns this off.
+static constexpr uintptr_t RVA_HUD_PARTY_SET = 0x168850, RVA_HUD_PARTY_CLEAR = 0x168970;
+static constexpr uintptr_t ACTOR_PARTY_SEAT = 0xDD0, ACTOR_FLAGS_6C8 = 0x6C8;
+static uintptr_t g_gaugeActor[2] = {0, 0};
+static int g_gaugeIndex[2] = {0, 0}; // HUD table index (seat + 1) registered for puppet i
+
+static bool CloneGaugeEnabled() {
+    static const bool enabled = [] { char v[2] {}; return !(GetEnvironmentVariableA("KH2COOP_CLONE_GAUGE", v, 2) == 1 && v[0] == '0'); }();
+    return enabled;
+}
+
+static void CloneGaugeClear(int i) {
+    if (g_gaugeActor[i] == 0) return;
+    const int index = g_gaugeIndex[i];
+    g_gaugeActor[i] = 0; g_gaugeIndex[i] = 0;
+    __try {
+        reinterpret_cast<void(*)(int)>(g_exeBase + RVA_HUD_PARTY_CLEAR)(index);
+        Log("[gauge] cleared HUD party index %d (puppet %d)", index, i);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[gauge] clear faulted (puppet %d)", i);
+    }
+}
+
+// Game thread, from the clone's own entity update: the actor is alive this frame.
+static void CloneGaugeRegister(int i, uintptr_t actor) {
+    if (!CloneGaugeEnabled() || g_gaugeActor[i] == actor) return;
+    if (g_clones[0] == 0 || (actor != g_clones[0] && actor != g_clones[1])) return; // Sora clones only
+    CloneGaugeClear(i);
+    int index = 0;
+    __try {
+        const int seat = *reinterpret_cast<const int*>(actor + ACTOR_PARTY_SEAT);
+        const auto flags = *reinterpret_cast<const uint32_t*>(actor + ACTOR_FLAGS_6C8);
+        if (seat < 0 || seat > 1 || ((flags >> 22) & 1)) return;
+        index = seat + 1;
+        reinterpret_cast<void(*)(int, uintptr_t)>(g_exeBase + RVA_HUD_PARTY_SET)(index, actor);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[gauge] register faulted (puppet %d actor=%p)", i, reinterpret_cast<void*>(actor));
+        return;
+    }
+    g_gaugeActor[i] = actor; g_gaugeIndex[i] = index;
+    Log("[gauge] registered clone %p as HUD party index %d (puppet %d)", reinterpret_cast<void*>(actor), index, i);
 }
 
 static std::uint32_t PlayerClassObjectId(uintptr_t actor) {
@@ -1491,6 +1544,7 @@ static void RestorePuppetTeam(PuppetDriver& d, int index) {
 // Forgets a driver's cached actor without writing to it (the actor may be
 // mid-teardown or already freed).
 static void ForgetPuppetActor(PuppetDriver& d) {
+    CloneGaugeClear(static_cast<int>(&d - g_puppets));
     d.actor = 0;
     d.teamSaved = false;
     d.noCollideSaved = false;
@@ -2532,6 +2586,7 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     if (!IsPuppetActive(index) || PuppetTarget(index) != reinterpret_cast<uintptr_t>(actorObj)) return;
     const auto actor = reinterpret_cast<uintptr_t>(actorObj);
     BindPuppetDrive(index, actor);
+    CloneGaugeRegister(index, actor);
     PuppetDriver& d = g_puppets[index];
     const auto& pose = d.pose.pose;
     uint32_t motion = pose.motionId;
@@ -3659,6 +3714,7 @@ void Shutdown() {
     // Drain spectate before clearing ANY restoration/lifetime authority.
     if (!downedspectate::Shutdown()) return;
     render::InvalidateCoopHud();
+    CloneGaugeClear(0); CloneGaugeClear(1);
     eventholdnative::Disable();
     AcquireSRWLockExclusive(&g_inputTraceLogLock);
     g_inputTraceBase.store(0, std::memory_order_release);
