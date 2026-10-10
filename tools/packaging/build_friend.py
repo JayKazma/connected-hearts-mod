@@ -148,7 +148,7 @@ def build(args):
     copy(ROOT/'build/_deps/minhook-src/LICENSE.txt','licenses/MinHook.txt')
     copy(ROOT/'docs/FRIEND_PLAYTEST.md','READ ME FIRST.txt')
     (output/'python/python311._pth').write_text('.\nLib\nDLLs\n../tools/launcher\n',encoding='ascii')
-    (output/'KH2COOP-PACKAGE').write_text('kh2coop-friend-package-v1\n',encoding='ascii')
+    (output/'CONNECTED-HEARTS-PACKAGE').write_text('connected-hearts-package-v1\n',encoding='ascii')
     (output/'Start KH2 Co-op.cmd').write_text('@echo off\ncd /d "%~dp0"\n"%~dp0python\\pythonw.exe" -I -B "%~dp0tools\\launcher\\friend.py"\n',encoding='ascii')
     files={p.relative_to(output).as_posix():digest(p) for p in sorted(output.rglob('*')) if p.is_file()}
     manifest={'schema':1,'name':'KH2 Co-op private friend preview','avatarBridgeVersion':3,'protocol':10,

@@ -19,9 +19,9 @@ def check(cli, output):
             assert not (root/'build').exists(),label+' wrote rig state'
             rows.append({'case':label,'argv':args,'exitCode':r.returncode,'stdout':r.stdout,'stderr':r.stderr})
         run('no-marker',['help'],root,False,'package folder')
-        (root/'KH2COOP-PACKAGE').write_text('wrong\n');(root/'package.json').write_text('{}')
+        (root/'CONNECTED-HEARTS-PACKAGE').write_text('wrong\n');(root/'package.json').write_text('{}')
         run('wrong-marker',['help'],root,False,'package folder')
-        (root/'KH2COOP-PACKAGE').write_text('kh2coop-friend-package-v1\n')
+        (root/'CONNECTED-HEARTS-PACKAGE').write_text('connected-hearts-package-v1\n')
         run('wrong-cwd',['help'],root/'bin',False,'package folder')
         run('help',['help'],root,True,'Internal commands: launch, instances, kill, overlay on|off --pid N, help.')
         for command in ('restart','boot-load-save','inject','poke','player-input','world-resync','capture'):

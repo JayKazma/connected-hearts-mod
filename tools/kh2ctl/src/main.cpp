@@ -181,15 +181,15 @@ void RequirePortablePackageRoot() {
         throw std::runtime_error("Cannot identify the packaged game helper.");
     }
     const auto executable = std::filesystem::canonical(module.data());
-    std::ifstream marker(root / "KH2COOP-PACKAGE");
+    std::ifstream marker(root / "CONNECTED-HEARTS-PACKAGE");
     std::string tag;
     std::getline(marker, tag);
-    if (tag != "kh2coop-friend-package-v1" ||
+    if (tag != "connected-hearts-package-v1" ||
         !std::filesystem::is_regular_file(root / "package.json") ||
         executable.parent_path().filename() != L"bin" ||
         !std::filesystem::equivalent(executable.parent_path().parent_path(), root)) {
-        throw std::runtime_error("Open Start KH2 Co-op.cmd from the unpacked package. "
-                                 "The portable helper requires its own package folder.");
+        throw std::runtime_error("Start the game from the Connected Hearts launcher. "
+                                 "chctl must run from bin\\ inside its own install folder.");
     }
 }
 #endif
@@ -2946,7 +2946,7 @@ CommandResult CmdWorldResync(std::vector<std::string> args) {
 
 void PrintUsage() {
 #ifdef KH2COOP_PORTABLE_PACKAGE
-    std::cout << "KH2 Co-op package helper. Open Start KH2 Co-op.cmd.\n"
+    std::cout << "Connected Hearts package helper. Start the game from the Connected Hearts launcher.\n"
                  "Internal commands: launch, instances, kill, overlay on|off --pid N, help.\n";
 #else
     std::cout
@@ -3027,7 +3027,7 @@ int main(int argc, char* argv[]) {
         if (command != "launch" && command != "instances" && command != "kill" &&
             command != "overlay" && command != "help" && command != "--help" && command != "-h") {
             const auto error = MakeError("Command unavailable in the friend package. "
-                                         "Open Start KH2 Co-op.cmd.");
+                                         "Start the game from the Connected Hearts launcher.");
             std::cout << error.json << std::endl;
             return error.exitCode;
         }
