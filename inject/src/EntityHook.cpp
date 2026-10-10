@@ -1617,8 +1617,9 @@ static void __fastcall Hooked(int32_t* list, uintptr_t partyRecord) {
             uint8_t* row = rows + k * 0x20;
             const int16_t seat = *reinterpret_cast<const int16_t*>(row);
             const int16_t charId = *reinterpret_cast<const int16_t*>(row + 2);
-            if (charId == 1 && seat != 0) {
-                if (g_logged < 10) { ++g_logged; Log("[menu] party list: Sora in seat %d (the other player) hidden from the pause menu", seat); }
+            const int16_t localChar = *reinterpret_cast<const int16_t*>(rows + 2);
+            if ((charId == 1 || charId == localChar) && seat != 0) { // a copy of this machine's player (Sora, or Roxas in the prologue)
+                if (g_logged < 10) { ++g_logged; Log("[menu] party list: character %d in seat %d (the other player) hidden from the pause menu", charId, seat); }
                 std::memmove(row, row + 0x20, static_cast<size_t>(count - k - 1) * 0x20);
                 std::memset(rows + (count - 1) * 0x20, 0, 0x20);
                 --count;

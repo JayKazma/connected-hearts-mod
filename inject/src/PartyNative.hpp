@@ -62,6 +62,8 @@ int PresentPuppetIndex();
 bool RoomAllowed(std::uint16_t world, std::uint16_t room, std::uint16_t evt);
 // Party kits (KH2COOP_PARTY_KITS=1 accepted at Install): per-seat kits are on for this machine.
 bool KitsActive();
+// One clone applied: the clone's member (SORA, or ROXAS in the prologue); 0 when not applied.
+std::uint16_t OneCloneKit();
 // Party kits: the clone kits the last applied load wrote (rev3: members 0/1; member 2 = AppliedLocal()).
 // False when not applied.
 bool AppliedMembers(std::uint16_t& member1, std::uint16_t& member2);

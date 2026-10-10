@@ -151,7 +151,10 @@ bool PartyProfile(Stamp& s) {
 // Vanilla player-class descriptor with its status key, from the reviewed kit table (PlayerKits.hpp):
 // Sora (84, key 1) always; any other qualified kit (Roxas 90/key 14) only while the remote kit member
 // or party kits are active. key==0 means "not a selectable clone descriptor".
-bool RoxasAllowed() {return playerkit::RemoteKitMemberActive() || partynative::KitsActive();}
+int KeyForKitEarly(std::uint16_t kit) {return kh2coop::kitStatusKey(kit);}
+bool OneCloneRoxas() {return partynative::OneCloneKit()==partynative::ROXAS;} // forced seat: the prologue's two Roxas
+bool RoxasAllowed() {return playerkit::RemoteKitMemberActive() || partynative::KitsActive() || OneCloneRoxas();}
+int OneCloneKey() {return OneCloneRoxas() ? KeyForKitEarly(partynative::ROXAS) : 1;}
 int KeyForKit(std::uint16_t kit) {return kh2coop::kitStatusKey(kit);} // the reviewed kit table
 // Party kits: the clones' key multiset equals the keys of the kits the observer wrote.
 bool PartyKeysMatch(const std::array<int,2>& keys) {
@@ -293,11 +296,11 @@ uintptr_t __fastcall Factory(std::uint32_t id,const float* point,float yaw) {
             // Guest worlds build the party as Sora / guest / Sora: raw567 is then the guest, not a Sora,
             // and the local is raw568. The guest construction leaves the pending clone armed.
             uintptr_t guestStatus=0;
-            if(id==567 && result && !SoraActor(result,guestStatus)) { /* the guest: keep waiting for 568 */ }
+            if(id==567 && result && !PlayerActor(result,guestStatus,OneCloneKey())) { /* the guest: keep waiting for 568 */ }
             else {
             const Pending p=g_pending;g_pending={};
             uintptr_t status=0,clone=0,player=0;Stamp after{};
-            const unsigned reason=!result || result==p.actor?1:!SoraActor(result,status)?2:Owned(status)?3:status==p.status?4:
+            const unsigned reason=!result || result==p.actor?1:!PlayerActor(result,status,OneCloneKey())?2:Owned(status)?3:status==p.status?4:
                 !PlayerActor(p.actor,clone,p.key) || clone!=p.status?5:!Owned(clone)?6:!Read(g_base+PlayerRva,player) || player!=result?7:
                 !StampNow(after) || !Same(after,p.stamp)?8:0;
             if(reason)BindFault(reason);
@@ -313,7 +316,7 @@ uintptr_t __fastcall Constructor(uintptr_t actor,uintptr_t descriptor,int form,u
     const DWORD error=GetLastError();const auto anchor=reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
     auto* parent=Current(anchor);Selection s{};
     if(parent && parent->candidate && !parent->selected && !parent->partyLocal && !parent->used && g_ready.load() &&
-       actor && ConstructorForm(descriptor,form) && (CloneDescriptorKey(descriptor)==1 || (CloneDescriptorKey(descriptor)!=0 && partynative::KitsActive()))) { // qualified kits only (CloneDescriptorKey)
+       actor && ConstructorForm(descriptor,form) && (CloneDescriptorKey(descriptor)==1 || (CloneDescriptorKey(descriptor)!=0 && (partynative::KitsActive() || OneCloneRoxas())))) { // qualified kits only (CloneDescriptorKey)
         const int k=CloneDescriptorKey(descriptor); // party kits: each build keeps its own descriptor's key
         Stamp now{};
         if(!StampNow(now) || !Same(now,parent->stamp) || !g_party.open || !Same(now,g_party.stamp))Fault();

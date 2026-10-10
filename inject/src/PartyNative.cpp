@@ -8,6 +8,7 @@
 #include "NativePrivateStatus.hpp"
 #include "PlayerKit.hpp"
 #include <Windows.h>
+#include <MinHook.h>
 #include <atomic>
 #endif
 
@@ -366,7 +367,7 @@ Reapply ApplyReapply(Intent& intent, const PartyReapply& reapply, std::uint32_t 
 unsigned OneCloneIndex(const LoadInput& in) {
     constexpr std::uint8_t ROW_DONALD = 1, ROW_GOOFY = 2;
     for (unsigned slot = 1; slot <= 2; ++slot) {
-        if (in.row[slot] == ROW_DONALD && in.resolved[1] == DONALD) return 1;
+        if (in.row[slot] == ROW_DONALD && (in.resolved[1] == DONALD || (in.forcedSeat && slot == 1))) return 1;
         if (in.row[slot] == ROW_GOOFY && in.resolved[2] == GOOFY) return 2;
     }
     return 0;
@@ -402,7 +403,7 @@ Load Decide(const LoadInput& in) {
     if (!in.kit1 || !in.kit2 || !in.localKit) return Load::Unsupported; // an invalid kit code
     // Party kits: member 0 must already be this machine's own kit (PlayerKit writes it first in the
     // same hook scope). Kits off: localKit is Sora, i.e. the VUH-1519 rule.
-    if (in.resolved[0] != in.localKit)
+    if (in.resolved[0] != in.localKit && !(oneClone && in.roxasLocal && in.resolved[0] == ROXAS))
         return qualifiedKit(in.resolved[0]) ? Load::LocalKitMismatch : Load::NativeNotDefault; // any qualified kit (the table)
     return Load::Applied;
 }
@@ -423,9 +424,10 @@ Load ApplyAfterResolve(const LoadInput& in, std::uint16_t* resolved, Originals& 
         // RestoreMembers leaves them alone.
         const unsigned idx = OneCloneIndex(in);
         if (idx == 0) return Load::NativeNotDefault; // never guess
+        const std::uint16_t clone = in.roxasLocal ? resolved[0] : SORA; // a copy of this machine's player
         original = {true, resolved[0], resolved[1], resolved[2], resolved[0],
-                    idx == 1 ? SORA : resolved[1], idx == 2 ? SORA : resolved[2]};
-        resolved[idx] = SORA;
+                    idx == 1 ? clone : resolved[1], idx == 2 ? clone : resolved[2]};
+        resolved[idx] = clone;
         return r;
     }
     // Rev3: in a party stamp the game builds member 0 first (raw566, a clone), member 1 next (raw567, a clone)
@@ -520,6 +522,35 @@ std::atomic<bool> g_requested {false};
 ReadyProbe g_neutralProbe = nullptr; // set once by ConfirmLocalReadiness, before any load
 bool g_echoGiveUpLogged = false;
 bool NeutralReady() { return g_neutralProbe && g_neutralProbe(); }
+// Forced seat (KH2COOP_FORCED_SEAT=1): rooms whose party row has no friend seat (the prologue,
+// solo story stretches) get one. The row getter 0x3E2E20 (world or -1 -> SAVE+0x3534+4*world; the
+// only reader of the row table) returns, for the applied world, a copy with slot 1 = Donald's
+// selector, whose member the load resolved to the clone. The save row itself is never written:
+// a write the game makes through the returned pointer is carried back to the real row on the next
+// call (slot 1 aside). Armed by the observer for the load it applied, disarmed at the next load.
+std::atomic<bool> g_forcedSeatEnabled {false};
+std::atomic<int> g_forceWorld {-1};
+std::uint8_t g_forcedRow[4] {}, g_forcedIssued[4] {};
+constexpr std::uint64_t RVA_ROW_GETTER = 0x3E2E20;
+constexpr std::uint8_t kRowGetterBytes[] = {0x85, 0xC9, 0x79, 0x07, 0x0F, 0xB6, 0x0D, 0xDD, 0x41, 0x33, 0x00, 0x48, 0x63, 0xC1};
+using PFN_RowGetter = std::uint8_t*(__fastcall*)(int world);
+PFN_RowGetter g_origRowGetter = nullptr;
+std::uint8_t* __fastcall HookedRowGetter(int world) {
+    std::uint8_t* real = g_origRowGetter(world);
+    const int forced = g_forceWorld.load(std::memory_order_acquire);
+    if (forced < 0) return real;
+    __try {
+        const int w = world < 0 ? *reinterpret_cast<const std::uint8_t*>(g_base + 0x717008) : world;
+        if (w != forced) return real;
+        for (int s = 0; s < 4; ++s) if (s != 1 && g_forcedRow[s] != g_forcedIssued[s]) real[s] = g_forcedRow[s];
+        std::memcpy(g_forcedRow, real, 4);
+        g_forcedRow[1] = 1; // Donald's selector: its member holds the clone
+        std::memcpy(g_forcedIssued, g_forcedRow, 4);
+        return g_forcedRow;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return real; }
+}
+bool NoFriendRow(const std::array<std::uint8_t, 4>& row) { return row[0] == 0 && row[1] == 0x12 && row[2] == 0x12; }
+
 // R2: the host neither publishes nor adopts unless every local prerequisite is live.
 bool LocallyReady() { return g_requested.load(std::memory_order_acquire) && privatestatus::Ready() && NeutralReady(); }
 // Game thread only.
@@ -600,7 +631,15 @@ void Observer(std::uint16_t* resolved, const playerkit::LoadContext& c) {
     __try {
         in.resolved[0] = resolved[0]; in.resolved[1] = resolved[1]; in.resolved[2] = resolved[2];
         in.rowRead = ReadRow(in.world, in.row);
+        g_forceWorld.store(-1, std::memory_order_release);
+        if (g_forcedSeatEnabled.load(std::memory_order_acquire) && in.rowRead && in.plan == Plan::OneClone && NoFriendRow(in.row)) {
+            in.forcedSeat = true;
+            in.row[1] = 1;
+        }
+        // The prologue's player is Roxas: the clone is then a second Roxas (forced seat mode only).
+        in.roxasLocal = g_forcedSeatEnabled.load(std::memory_order_acquire) && !KitsActive() && in.resolved[0] == ROXAS;
         r = ApplyAfterResolve(in, resolved, g_original);
+        if (r == Load::Applied && in.forcedSeat) g_forceWorld.store(in.world, std::memory_order_release);
         ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_original = {};
@@ -625,7 +664,8 @@ void Observer(std::uint16_t* resolved, const playerkit::LoadContext& c) {
 void ObserverLog(playerkit::LogFn log) {
     if (!log || !g_requested.load(std::memory_order_acquire)) return;
     const auto& in = g_lastIn;
-    log("[partynative] load world=%u room=%u evt=%u eventCtx=%d cutscene=%d private=%u neutral=%u intent=%02X/%02X/%u row=%02X/%02X/%02X/%02X native=0x%X/0x%X/0x%X plan=%s result=%s set=0x%X/0x%X loads=%u applied=%u source=%s misses=%u",
+    log("[partynative] load%s%s world=%u room=%u evt=%u eventCtx=%d cutscene=%d private=%u neutral=%u intent=%02X/%02X/%u row=%02X/%02X/%02X/%02X native=0x%X/0x%X/0x%X plan=%s result=%s set=0x%X/0x%X loads=%u applied=%u source=%s misses=%u",
+        in.forcedSeat ? " forced-seat" : "", in.roxasLocal ? " roxas" : "",
         in.world, in.room, in.evtProgram, in.eventContext != 0, in.cutsceneState, in.privateStatusReady ? 1u : 0u,
         in.neutralInputReady ? 1u : 0u, in.intentWorld & 0xFF, in.intentRoom & 0xFF, in.intentEvt, in.row[0], in.row[1], in.row[2], in.row[3],
         in.resolved[0], in.resolved[1], in.resolved[2], PlanName(in.plan), g_lastOk ? LoadName(g_lastResult) : "fault",
@@ -669,6 +709,17 @@ bool Install(std::uintptr_t exeBase, LogFn log) {
         g_kits.store(true, std::memory_order_release);
         if (log) log("[partynative] party kits: each seat shows its owner's chosen kit (a qualified kit of the PlayerKits table); local kit %s",
                      flags.kit ? "from KH2COOP_PLAYER_KIT (checked by PlayerKit)" : "Sora 0x54");
+    }
+    if (Enabled("KH2COOP_FORCED_SEAT")) {
+        void* getter = reinterpret_cast<void*>(exeBase + RVA_ROW_GETTER);
+        MH_STATUS st = MH_UNKNOWN;
+        if (std::memcmp(getter, kRowGetterBytes, sizeof(kRowGetterBytes)) == 0) {
+            st = MH_CreateHook(getter, reinterpret_cast<void*>(&HookedRowGetter), reinterpret_cast<void**>(&g_origRowGetter));
+            if (st == MH_OK) st = MH_EnableHook(getter);
+        }
+        g_forcedSeatEnabled.store(st == MH_OK, std::memory_order_release);
+        if (log) log(st == MH_OK ? "[partynative] forced seat on: rooms with no friend seat get one for the other player (row getter 0x3E2E20)"
+                                 : "[partynative] forced seat unavailable (row getter bytes or hook failed: %d)", st);
     }
     playerkit::SetResolveObserver(&Observer, &ObserverLog);
     g_requested.store(true, std::memory_order_release);
@@ -904,6 +955,12 @@ unsigned AppliedClones() {
 }
 
 bool KitsActive() { return Requested() && g_kits.load(std::memory_order_acquire); }
+
+std::uint16_t OneCloneKit() {
+    if (AppliedClones() != 1) return 0;
+    const std::uint64_t v = g_appliedOne.load(std::memory_order_acquire);
+    return static_cast<std::uint16_t>(v & 0xFFFF); // the clone is a copy of member 0 (this machine's player)
+}
 
 std::uint16_t AppliedLocal() {
     std::uint16_t m1 = 0, m2 = 0;

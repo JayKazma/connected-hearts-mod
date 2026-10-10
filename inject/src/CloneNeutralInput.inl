@@ -97,7 +97,7 @@ static bool SoraDescriptor(uintptr_t actor) {
     const char* name = reinterpret_cast<const char*>(obj + offsets::objentry::NAME);
     // The reviewed kit table: Sora always; any other qualified kit (Roxas: live run 084248 showed a
     // never-neutralized Roxas clone) only while party kits are active on this machine.
-    return kh2coop::kitNeutralDescriptor(id, type, name, 8, partynative::KitsActive());
+    return kh2coop::kitNeutralDescriptor(id, type, name, 8, partynative::KitsActive() || partynative::OneCloneKit() == partynative::ROXAS);
 }
 
 static bool CanonicalActor(uintptr_t actor) {

@@ -178,6 +178,12 @@ struct LoadInput {
     std::uint16_t kit1 = SORA, kit2 = SORA, localKit = SORA;
     // R3-1: member 0 as 3E2EB0 resolved it, BEFORE PlayerKit's kit write (0 = unknown: use resolved[0]).
     std::uint16_t native0 = 0;
+    // Forced seat: the row has no friend seat; the load is decided as if row slot 1 held Donald's
+    // selector, and the row getter (0x3E2E20) returns that row for this world while it is applied.
+    bool forcedSeat = false;
+    // One clone with party kits off: member 0 as resolved is this machine's player (Sora, or Roxas in
+    // the prologue); the clone is a copy of it.
+    bool roxasLocal = false;
 };
 Load Decide(const LoadInput& in);
 // One clone: the resolved member (1 or 2) the clone replaces for this load; 0 = no replaceable member.
