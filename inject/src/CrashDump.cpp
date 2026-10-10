@@ -9,6 +9,7 @@
 #include <MinHook.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace kh2coop {
 namespace inject {
@@ -53,6 +54,52 @@ LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* info) {
     return g_next ? g_next(info) : EXCEPTION_CONTINUE_SEARCH;
 }
 
+// First-chance record (vectored handler): the unhandled filter above never ran for the 2026-10-09
+// cast-replay crash (empty dump, no log line), so the fault is written here first, from the faulting
+// thread, before any unwinding: code, address as module+RVA, and the stack's qwords that point into
+// the game or this DLL (candidate return addresses). Only fatal codes; breakpoints and C++ throws are skipped.
+volatile LONG g_firstChance = 0;
+void Describe(const void* p, char* out, size_t n) {
+    HMODULE m = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(p), &m) && m) {
+        char name[MAX_PATH] = "?"; GetModuleFileNameA(m, name, MAX_PATH);
+        const char* base = name; for (const char* c = name; *c; ++c) if (*c == '\\' || *c == '/') base = c + 1;
+        snprintf(out, n, "%s+0x%llX", base, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(m)));
+    } else snprintf(out, n, "%p", p);
+}
+LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !g_log) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_PRIV_INSTRUCTION && code != EXCEPTION_IN_PAGE_ERROR) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedCompareExchange(&g_firstChance, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
+    char at[MAX_PATH + 32]; Describe(info->ExceptionRecord->ExceptionAddress, at, sizeof(at));
+    const auto* ctx = info->ContextRecord;
+    g_log("[crash] first chance 0x%08lX at %s (rip=%p rsp=%p) access=%llu addr=%p tid=%lu", code, at,
+          ctx ? reinterpret_cast<void*>(ctx->Rip) : nullptr, ctx ? reinterpret_cast<void*>(ctx->Rsp) : nullptr,
+          static_cast<unsigned long long>(info->ExceptionRecord->NumberParameters > 0 ? info->ExceptionRecord->ExceptionInformation[0] : 0),
+          info->ExceptionRecord->NumberParameters > 1 ? reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]) : nullptr,
+          GetCurrentThreadId());
+    if (ctx) {
+        g_log("[crash] rcx=%p rdx=%p r8=%p r9=%p rax=%p rbx=%p rsi=%p rdi=%p", reinterpret_cast<void*>(ctx->Rcx), reinterpret_cast<void*>(ctx->Rdx),
+              reinterpret_cast<void*>(ctx->R8), reinterpret_cast<void*>(ctx->R9), reinterpret_cast<void*>(ctx->Rax), reinterpret_cast<void*>(ctx->Rbx),
+              reinterpret_cast<void*>(ctx->Rsi), reinterpret_cast<void*>(ctx->Rdi));
+        const auto* sp = reinterpret_cast<const uintptr_t*>(ctx->Rsp);
+        unsigned shown = 0;
+        for (unsigned i = 0; i < 512 && shown < 24; ++i) {
+            uintptr_t v = 0;
+            __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+            HMODULE m = nullptr;
+            if (v < 0x10000 || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(v), &m) || !m) continue;
+            char name[MAX_PATH] = "?"; GetModuleFileNameA(m, name, MAX_PATH);
+            if (!strstr(name, "KINGDOM HEARTS II") && !strstr(name, "kh2coop_inject")) continue;
+            char d[MAX_PATH + 32]; Describe(reinterpret_cast<const void*>(v), d, sizeof(d));
+            g_log("[crash]   stack[%u] %s", i, d); ++shown;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 // Keeps our filter on top: whatever the game installs becomes the next link.
 LPTOP_LEVEL_EXCEPTION_FILTER WINAPI HookedSetFilter(LPTOP_LEVEL_EXCEPTION_FILTER filter) {
     if (filter == &OnUnhandled) return g_origSetFilter(filter);
@@ -66,6 +113,7 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI HookedSetFilter(LPTOP_LEVEL_EXCEPTION_FILTER
 
 bool Install(LogFn log) {
     g_log = log;
+    AddVectoredExceptionHandler(1, &OnFirstChance);
     g_next = SetUnhandledExceptionFilter(&OnUnhandled);
     MH_STATUS st = MH_CreateHookApi(L"kernelbase", "SetUnhandledExceptionFilter",
                                     reinterpret_cast<void*>(&HookedSetFilter),
