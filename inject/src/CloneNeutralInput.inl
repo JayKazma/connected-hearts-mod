@@ -256,6 +256,18 @@ static void __fastcall HookedMovementUpdate(void* actorObj) {
     ++g_stats->movementGated;
     if (saved.id != 0) ++g_stats->commandSuppressed;
     NeutraliseFc(saved.flags);
+    {
+        // Cast replay (clonecast): the owner's executed command runs on this clone through the
+        // same FC path, in place of the zero id. No lock-on target; the window's restore is unchanged.
+        std::uint16_t id = 0, category = 0; std::uint8_t flags = 0, form = 0;
+        if (clonecast::Take(actor, id, category, flags, form)) {
+            auto* fc = FieldCommand();
+            std::memcpy(fc + FC_COMMAND_ID, &id, sizeof(id));
+            std::memcpy(fc + FC_COMMAND_ID + 2, &category, sizeof(category));
+            fc[FC_COMMAND_FLAGS] = static_cast<std::uint8_t>((saved.flags & 0xE0) | (flags & 0x1F));
+            fc[FC_COMMAND_FLAGS + 1] = form;
+        }
+    }
     FcWindow* const previous = g_open;
     g_open = &saved;
     __try {

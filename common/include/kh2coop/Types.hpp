@@ -169,6 +169,15 @@ struct AvatarState {
     std::uint32_t downedEpoch {0};
     std::uint64_t downedEpisode {0};
     std::uint64_t downedDelivery {0}; // captured transport lifetime, not retagged
+    // v15: the owner's last executed field command (magic, item...), replayed on its clone through
+    // the game's own command path so the cast's motion, VFX and SFX play natively. castSeq changes
+    // once per execution; castId is the command id, castCategory the menu category, castFlags and
+    // castForm the FIELD_COMMAND record bytes +4/+5 as the owner executed them.
+    std::uint16_t castSeq {0};
+    std::uint16_t castId {0};
+    std::uint16_t castCategory {0};
+    std::uint8_t castFlags {0};
+    std::uint8_t castForm {0};
 };
 
 struct InputButtons {

@@ -428,6 +428,11 @@ struct PuppetDriver {
     puppethold::HeldClock heldClock {}; // VUH-1787: frames the pose has been AvatarHeld
     int pendingMotion = -1;      // locomotion change waiting to be confirmed
     int pendingFrames = 0;       // consecutive frames it has been requested
+    uint16_t lastCastSeq = 0;    // owner cast already replayed (see clonecast)
+    bool castPrimed = false;     // lastCastSeq holds the stream's value since this activation
+    bool castPending = false;    // a replay waits for the clone's next movement update
+    uint16_t castId = 0, castCategory = 0; uint8_t castFlags = 0, castForm = 0;
+    uint32_t nativeCastUntil = 0; // frames while the clone's own command path owns its motion
 };
 static PuppetDriver g_puppets[2];
 static bool g_inPuppetAnimSet = false;
@@ -1378,6 +1383,84 @@ static int PuppetIndexFor(uintptr_t actor) {
     return -1;
 }
 
+// ============================================================================
+// Cast replay (magic, items): the owner's executed field command runs on its clone
+// ============================================================================
+// Owner side: 0x3D6FC0 is the player's field-command execution (movement update 0x3A89A0 calls it
+// every frame with FIELD_COMMAND+8; a non-zero id executes). When the canonical player executes
+// one, its record bytes go out with the avatar stream (castSeq bumps once per execution).
+// Clone side: the stream's castSeq change queues the record; CloneNeutralInput's gated window
+// (the clone's own movement update, FC neutralised) writes it into FC instead of a zero id, so
+// the game runs the command for the clone through its own path: cast motion, VFX, SFX, MP
+// gauge of the clone's private record. Hits from the clone's attacks are already cosmetic
+// (DamagePolicy zeroes remote-source damage). Targeted spells get no lock-on target.
+namespace clonecast {
+static constexpr uintptr_t RVA_FC_EXECUTE = 0x3D6FC0;
+static constexpr uint8_t kFcExecuteBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x81, 0xA1, 0x24, 0x01, 0x00, 0x00};
+using PFN_FcExecute = uintptr_t(__fastcall*)(void* actor, const uint16_t* record);
+static PFN_FcExecute g_origFcExecute = nullptr;
+static bool g_enabled = true; // KH2COOP_CAST_REPLAY=0 disables (hook still logs nothing)
+struct Local { uint16_t seq = 0, id = 0, category = 0; uint8_t flags = 0, form = 0; };
+static Local g_local; // owner thread only
+static unsigned g_logged = 0;
+
+static uintptr_t __fastcall HookedFcExecute(void* actor, const uint16_t* record) {
+    const auto result = g_origFcExecute(actor, record);
+    if (result == 0 || reinterpret_cast<uintptr_t>(actor) != g_soraActor) return result;
+    __try {
+        const uint16_t id = record[0];
+        if (id == 0) return result;
+        g_local.id = id; g_local.category = record[1];
+        g_local.flags = reinterpret_cast<const uint8_t*>(record)[4];
+        g_local.form = reinterpret_cast<const uint8_t*>(record)[5];
+        ++g_local.seq; if (g_local.seq == 0) g_local.seq = 1;
+        if (g_logged < 20) { ++g_logged; Log("[cast] frame %u local command id=%u category=%u flags=%02X form=%u seq=%u", g_frameCounter, id, g_local.category, g_local.flags, g_local.form, g_local.seq); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return result;
+}
+
+static void Stamp(AvatarState& a) {
+    a.castSeq = g_local.seq; a.castId = g_local.id; a.castCategory = g_local.category;
+    a.castFlags = g_local.flags; a.castForm = g_local.form;
+}
+
+// Clone side, pose admission: queue a new cast for puppet i.
+static void Admit(int i, const AvatarState& pose) {
+    PuppetDriver& d = g_puppets[i];
+    if (!d.castPrimed) { d.castPrimed = true; d.lastCastSeq = pose.castSeq; return; } // history, not an event
+    if (pose.castSeq == d.lastCastSeq) return;
+    d.lastCastSeq = pose.castSeq;
+    if (!g_enabled || pose.castId == 0) return;
+    d.castPending = true; d.castId = pose.castId; d.castCategory = pose.castCategory;
+    d.castFlags = pose.castFlags; d.castForm = pose.castForm;
+}
+
+// Clone side, from the clone's gated movement update: the record to execute now, if any.
+static bool Take(uintptr_t actor, uint16_t& id, uint16_t& category, uint8_t& flags, uint8_t& form) {
+    for (int i = 0; i < 2; ++i) {
+        PuppetDriver& d = g_puppets[i];
+        if (!d.castPending || d.actor != actor || !IsPuppetActive(i)) continue;
+        d.castPending = false;
+        id = d.castId; category = d.castCategory; flags = d.castFlags; form = d.castForm;
+        d.nativeCastUntil = g_frameCounter + 120;
+        if (g_logged < 40) { ++g_logged; Log("[cast] frame %u replay on clone %p (puppet %d): id=%u category=%u flags=%02X form=%u", g_frameCounter, reinterpret_cast<void*>(actor), i, id, category, flags, form); }
+        return true;
+    }
+    return false;
+}
+
+static void Install(uintptr_t exeBase) {
+    char v[2] {};
+    if (GetEnvironmentVariableA("KH2COOP_CAST_REPLAY", v, sizeof(v)) == 1 && v[0] == '0') { g_enabled = false; Log("[cast] replay disabled by KH2COOP_CAST_REPLAY=0"); return; }
+    void* addr = reinterpret_cast<void*>(exeBase + RVA_FC_EXECUTE);
+    if (std::memcmp(addr, kFcExecuteBytes, sizeof(kFcExecuteBytes)) != 0) { g_enabled = false; Log("[cast] FcExecute bytes don't match; cast replay off"); return; }
+    MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&HookedFcExecute), reinterpret_cast<void**>(&g_origFcExecute));
+    if (st == MH_OK) st = MH_EnableHook(addr);
+    if (st != MH_OK) { g_enabled = false; Log("[cast] FcExecute hook failed: %d (%s); cast replay off", st, MH_StatusToString(st)); return; }
+    Log("[cast] replay ready: FcExecute hook at RVA 0x%llX", static_cast<unsigned long long>(RVA_FC_EXECUTE));
+}
+} // namespace clonecast
+
 #include "DownedSpectate.inl"
 
 #include "CloneNeutralInput.inl"
@@ -1697,6 +1780,7 @@ static void PollPuppetPoses() {
             if (!suspended && pose.active && ValidPuppetProvenance(pose.provenance,
                     static_cast<std::uint8_t>(pose.pose.ownerSlot), i, enemysync::CapturePuppetAuthority())) {
                 driver.pose = pose;
+                clonecast::Admit(i, pose.pose);
                 playerkit::NoteRemoteRoster(i, pose.pose.character); // VUH-1513 remote kit member (default off)
                 partynative::NoteRemoteKit(i, pose.pose.character);  // party kits: the owner's chosen kit (default off)
                 driver.have = true;
@@ -1711,6 +1795,7 @@ static void PollPuppetPoses() {
         if (wasApplied && !active) {
             RestorePuppetTeam(driver, i);
             driver.lastAnim = -1;
+            driver.castPrimed = false; driver.castPending = false; driver.nativeCastUntil = 0;
             Log("Puppet %d released", i);
         } else if (!wasApplied && active) {
             Log("Puppet %d active", i);
@@ -2686,6 +2771,13 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     // held at idle until the spell path is understood. Attack 151 and the
     // basic motions play fine.
     if (motion == PUPPET_CLONE_UNSAFE_MOTION && IsPlayerClassActor(actor)) {
+        if (g_frameCounter < d.nativeCastUntil) {
+            // The clone is running the replayed command itself (clonecast): its own path set the
+            // cast motion with the state the raw SetAnimation lacked. Leave the clip alone.
+            d.lastAnim = static_cast<int>(motion);
+            d.pendingMotion = -1; d.pendingFrames = 0;
+            return;
+        }
         motion = ANIM_IDLE;
     } else if (motion > PUPPET_MAX_BASIC_MOTION && !IsPlayerClassActor(actor)) {
         // Unknown to the friend's moveset for now: idle if still, else run.
@@ -3345,6 +3437,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             AvatarState avatar = captureAvatar(DirectMemory {}, g_exeBase, g_soraActor,
                                                inEvent, false);
             avatar.seq = g_frameCounter;
+            clonecast::Stamp(avatar);
             // VUH-1513: only with a kit requested does the roster byte report the
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit
@@ -3758,6 +3851,7 @@ bool Initialize(uintptr_t exeBase) {
                 ? "[privatestatus] initialization refused: KH2COOP_PLAYER_KIT is set (VUH-1513; per-puppet member slots are VUH-1519)"
                 : "[privatestatus] initialization refused; profile unqualified");
     cloneneutral::Install(exeBase); // VUH-1489: default off (KH2COOP_CLONE_NEUTRAL_INPUT)
+    clonecast::Install(exeBase);    // cast replay on clones (needs the neutral-input window; KH2COOP_CAST_REPLAY=0 off)
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the

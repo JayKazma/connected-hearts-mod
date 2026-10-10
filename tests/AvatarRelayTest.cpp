@@ -395,8 +395,8 @@ void testAvatarBridge() {
               got.pose.ownerSlot == SlotType::Friend2 && got.pose.position.x == 9.0f,
           "DLL reads puppet 1's pose");
     PuppetAuthority authority {PuppetAuthorityMode::Network, 0, 17, kRoster};
-    check(AVATAR_BRIDGE_VERSION == 4 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
-          "bridge v4 preserves full network provenance");
+    check(AVATAR_BRIDGE_VERSION == 5 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
+          "bridge v5 preserves full network provenance");
     check(!dll.TryReadPuppet(1, got), "cached puppet has no new shared-memory sample");
     authority.connectionIds[2] += 0x100000000ULL;
     check(!ValidPuppetProvenance(got.provenance, 2, 1, authority) && got.pose.position.x == 9.0f,
@@ -887,7 +887,7 @@ void testVersionReject() {
     while (steadyMs() < legacyDeadline && !disconnected) {
         host.tick(0); legacy.tick(0); std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    check(PROTOCOL_VERSION == 14 && disconnected && reason == "Protocol mismatch: client=3 server=" + std::to_string(PROTOCOL_VERSION) && host.verifiedPeerCount() == 0,
+    check(PROTOCOL_VERSION == 15 && disconnected && reason == "Protocol mismatch: client=3 server=" + std::to_string(PROTOCOL_VERSION) && host.verifiedPeerCount() == 0,
           "otherwise matching legacy v3 peer is rejected for exact protocol mismatch with free capacity");
 }
 

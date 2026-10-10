@@ -683,6 +683,11 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU32(a.downedEpoch);
     w.writeU64(a.downedEpisode);
     w.writeU64(a.downedDelivery);
+    w.writeU16(a.castSeq);
+    w.writeU16(a.castId);
+    w.writeU16(a.castCategory);
+    w.writeU8(a.castFlags);
+    w.writeU8(a.castForm);
 }
 
 void write(ByteWriter& w, const ClockPing& p) { w.writeU64(p.clientSendMs); }
@@ -1096,6 +1101,11 @@ void read(ByteReader& r, AvatarState& a) {
     a.downedEpoch = r.readU32();
     a.downedEpisode = r.readU64();
     a.downedDelivery = r.readU64();
+    a.castSeq = r.readU16();
+    a.castId = r.readU16();
+    a.castCategory = r.readU16();
+    a.castFlags = r.readU8();
+    a.castForm = r.readU8();
 }
 
 void read(ByteReader& r, ClockPing& p) { p.clientSendMs = r.readU64(); }

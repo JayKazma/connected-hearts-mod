@@ -45,7 +45,7 @@ static_assert(std::is_trivially_copyable_v<AvatarState>,
 
 static constexpr const char* AVATAR_BRIDGE_PREFIX = "Local\\kh2coop_avatar_";
 static constexpr std::uint32_t AVATAR_BRIDGE_MAGIC = 0x42564B32; // "2KVB"
-static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 4;
+static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 5; // v5: AvatarState carries the owner's executed field command (cast replay)
 static constexpr int AVATAR_BRIDGE_PUPPETS = 2; // friend slots 1 and 2
 
 // A pose the DLL should apply to a friend-slot puppet.
