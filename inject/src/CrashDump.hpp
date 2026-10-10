@@ -19,6 +19,11 @@ using LogFn = void (*)(const char* fmt, ...);
 // filter is still installed in that case, but the game may replace it.
 bool Install(LogFn log);
 
+// Game thread, once in a while: puts our first-chance logger back at the head of the vectored
+// handler list (a runtime loaded later, e.g. clr.dll, registers ahead of us and can die in its own
+// handler before ours sees the exception). Also logs the loaded modules the first time.
+void KeepFirst();
+
 } // namespace crashdump
 } // namespace inject
 } // namespace kh2coop

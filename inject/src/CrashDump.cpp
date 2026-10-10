@@ -6,6 +6,7 @@
 
 #include <Windows.h>
 #include <DbgHelp.h>
+#include <Psapi.h>
 #include <MinHook.h>
 
 #include <cstdio>
@@ -85,17 +86,23 @@ LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* info) {
               reinterpret_cast<void*>(ctx->R8), reinterpret_cast<void*>(ctx->R9), reinterpret_cast<void*>(ctx->Rax), reinterpret_cast<void*>(ctx->Rbx),
               reinterpret_cast<void*>(ctx->Rsi), reinterpret_cast<void*>(ctx->Rdi));
         const auto* sp = reinterpret_cast<const uintptr_t*>(ctx->Rsp);
-        unsigned shown = 0;
+        unsigned shown = 0, any = 0;
         for (unsigned i = 0; i < 512 && shown < 24; ++i) {
             uintptr_t v = 0;
             __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
             HMODULE m = nullptr;
             if (v < 0x10000 || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(v), &m) || !m) continue;
             char name[MAX_PATH] = "?"; GetModuleFileNameA(m, name, MAX_PATH);
-            if (!strstr(name, "KINGDOM HEARTS II") && !strstr(name, "kh2coop_inject")) continue;
+            const bool ours = strstr(name, "KINGDOM HEARTS II") || strstr(name, "kh2coop_inject");
+            if (!ours && any >= 16) continue; // other modules: the first 16 code pointers only (who called into clr/ntdll/...)
             char d[MAX_PATH + 32]; Describe(reinterpret_cast<const void*>(v), d, sizeof(d));
-            g_log("[crash]   stack[%u] %s", i, d); ++shown;
+            g_log("[crash]   stack[%u] %s", i, d);
+            if (ours) ++shown; else ++any;
         }
+        // Which module owns the stack this thread runs on (a fiber's stack is heap-allocated, a thread's is not).
+        MEMORY_BASIC_INFORMATION mbi {};
+        if (VirtualQuery(sp, &mbi, sizeof(mbi)) == sizeof(mbi))
+            g_log("[crash] stack region base=%p alloc=%p size=0x%llX state=%lX type=%lX", mbi.BaseAddress, mbi.AllocationBase, static_cast<unsigned long long>(mbi.RegionSize), mbi.State, mbi.Type);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -111,9 +118,29 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI HookedSetFilter(LPTOP_LEVEL_EXCEPTION_FILTER
 
 } // namespace
 
+void* g_veh = nullptr;
+void KeepFirst() {
+    static unsigned calls = 0;
+    if (++calls == 1 && g_log) {
+        HMODULE mods[256]; DWORD needed = 0;
+        if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+            const unsigned n = needed / sizeof(HMODULE);
+            for (unsigned i = 0; i < n && i < 256; ++i) {
+                char name[MAX_PATH] = "?"; GetModuleFileNameA(mods[i], name, MAX_PATH);
+                const char* base = name; for (const char* c = name; *c; ++c) if (*c == '\\' || *c == '/') base = c + 1;
+                if (strstr(base, "clr") || strstr(base, "cor") || strstr(base, "mscor") || strstr(base, "hostfxr") || strstr(base, "coreclr"))
+                    g_log("[crash] .NET module in process: %s (%p)", name, reinterpret_cast<void*>(mods[i]));
+            }
+            g_log("[crash] %u modules loaded", n);
+        }
+    }
+    if (g_veh) RemoveVectoredExceptionHandler(g_veh);
+    g_veh = AddVectoredExceptionHandler(1, &OnFirstChance);
+}
+
 bool Install(LogFn log) {
     g_log = log;
-    AddVectoredExceptionHandler(1, &OnFirstChance);
+    g_veh = AddVectoredExceptionHandler(1, &OnFirstChance);
     g_next = SetUnhandledExceptionFilter(&OnUnhandled);
     MH_STATUS st = MH_CreateHookApi(L"kernelbase", "SetUnhandledExceptionFilter",
                                     reinterpret_cast<void*>(&HookedSetFilter),
