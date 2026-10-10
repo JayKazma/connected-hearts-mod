@@ -2241,12 +2241,30 @@ static constexpr uint8_t kBytes[] = {0x48, 0x8B, 0x89, 0xC0, 0x0D, 0x00, 0x00, 0
 using PFN_Tick = void(__fastcall*)(uintptr_t actor);
 static PFN_Tick g_orig = nullptr;
 static unsigned g_skipped = 0;
+// Binding a player-class actor (0x3AA850 -> 0x3FD830, run by the constructor and on activation)
+// makes it the field command's owner: FC+0xAE0 (whose state the tick reads) and FC+0xC38 (whose
+// readiness ends the post-command lock). A clone spawned after the player takes ownership, and the
+// player's own command flow then follows the clone's state (battle-to-idle transition looping on
+// the player after a spell, 2026-10-10). The owner is put back to the player before each tick.
+static constexpr uintptr_t FC_OWNER = 0xAE0, FC_LOCK_OWNER = 0xC38;
 static void __fastcall Hooked(uintptr_t actor) {
     __try {
         const uintptr_t player = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_NATIVE_PLAYER);
-        if (actor != player && player != 0 && *reinterpret_cast<const uintptr_t*>(actor + 0xDC0) == g_exeBase + RVA_FIELD_COMMAND && clonewpn::CloneAlive(actor)) {
-            if (g_skipped++ == 0) Log("[fc] skipping the shared field-command tick for clone %p (menu input is the local player's)", reinterpret_cast<void*>(actor));
-            return;
+        const uintptr_t fc = g_exeBase + RVA_FIELD_COMMAND;
+        if (player != 0 && *reinterpret_cast<const uintptr_t*>(actor + 0xDC0) == fc) {
+            if (actor != player && clonewpn::CloneAlive(actor)) {
+                if (g_skipped++ == 0) Log("[fc] skipping the shared field-command tick for clone %p (menu input is the local player's)", reinterpret_cast<void*>(actor));
+                return;
+            }
+            if (actor == player) {
+                auto* owner = reinterpret_cast<uintptr_t*>(fc + FC_OWNER);
+                auto* lockOwner = reinterpret_cast<uintptr_t*>(fc + FC_LOCK_OWNER);
+                if ((*owner != player && *owner != 0 && clonewpn::CloneAlive(*owner)) || (*lockOwner != player && *lockOwner != 0 && clonewpn::CloneAlive(*lockOwner))) {
+                    static unsigned logged = 0;
+                    if (logged++ < 20) Log("[fc] field command owned by clone (owner %p, lock owner %p); rebound to the player %p", reinterpret_cast<void*>(*owner), reinterpret_cast<void*>(*lockOwner), reinterpret_cast<void*>(player));
+                    *owner = player; *lockOwner = player;
+                }
+            }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     g_orig(actor);
