@@ -1542,10 +1542,13 @@ static constexpr uintptr_t RVA_POST_FLAG = 0x1515C0, RVA_POST_NOTIFY = 0x163510;
 static constexpr uintptr_t ACTOR_OBJENTRY = 0x8, ACTOR_FLAGS = 0x6C8, ACTOR_WEAPON_SLOTS = 0xD60;
 static constexpr uintptr_t OBJENTRY_CHAR_ID = 0x4C, OBJENTRY_WEAPON_CLASS = 0x4E, WEAPON_EXTRA_HANDLE = 0xBB0;
 // Friend character table: [0]/[1] hold the objIds of the characters loaded into groups 0x96A / 0x974
-// (Donald 0x5C, Goofy 0x5D); their weapons take group + 1 + slot. [1] is marked with the clone's
-// objId while its keyblade occupies 0x975.
+// (Donald 0x5C, Goofy 0x5D); their weapons take group + 1 + slot (diagnostics only).
 static constexpr uintptr_t RVA_PLAYER_GROUP_TABLE = 0x2A24FA8;
-static constexpr int CLONE_WEAPON_GROUP = 0x975;
+// The loader (0x39E000) keeps one entry per file path, except for groups 0x8FD and 0x138A, which
+// may hold a second copy of a file already loaded elsewhere: 0x8FD is Sora's keyblade, 0x138A the
+// keyblade group of the Roxas fight (his keyblades may match Sora's). A clone holding the same
+// keyblade as the local player is exactly that case, so the clone's keyblade loads into 0x138A.
+static constexpr int CLONE_WEAPON_GROUP = 0x138A;
 
 struct Sig { uintptr_t rva; uint8_t bytes[8]; };
 static constexpr Sig kSigs[] = {
@@ -1588,7 +1591,6 @@ static bool g_ready = false;    // every signature matched
 static uintptr_t g_appliedActor[2] {}; // clone actor the item was last applied to
 static uint16_t g_appliedItem[2] {};
 static uint32_t g_retryAt[2] {};
-static int32_t g_reservedObjId = 0;    // what we wrote into table[1]
 static unsigned g_logged = 0;
 struct Pending { bool active; int puppet; uintptr_t actor; uint16_t item; uint32_t objId; uint8_t visible; uint32_t since; };
 static Pending g_pending {}; // one swap in flight at a time
@@ -1629,6 +1631,23 @@ static bool LoaderIdle() {
         e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
     }
     return true;
+}
+
+// Load entries of a group: logged once per swap; true when at least one exists and none is mid-load.
+static bool GroupLoaded(int group) {
+    const auto base = g_exeBase;
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(base + RVA_LOAD_LIST_HEAD);
+    int found = 0, busy = 0;
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        if (*reinterpret_cast<const int32_t*>(e + 0x48) == group) {
+            ++found;
+            const uint8_t state = *reinterpret_cast<const uint8_t*>(e + 1);
+            if (state != 0 && state != 3) ++busy;
+            if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X entry %p: state %u refs %d flags %08X res %p path %s", group, reinterpret_cast<void*>(e), state, *reinterpret_cast<const int16_t*>(e + 2), *reinterpret_cast<const uint32_t*>(e + 0x44), *reinterpret_cast<void* const*>(e + 0x58), reinterpret_cast<const char*>(e + 4)); }
+        }
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    return found > 0 && busy == 0;
 }
 
 static bool CloneAlive(uintptr_t actor) {
@@ -1680,10 +1699,6 @@ static int BeginJob() {
     int weaponClass = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
     const uint32_t newObjId = reinterpret_cast<PFN_ItemToObjId>(base + RVA_ITEM_TO_OBJID)(weaponClass, item);
     if (newObjId == 0) return 3; // not a weapon of this class: nothing destroyed
-    auto* table = reinterpret_cast<int32_t*>(base + RVA_PLAYER_GROUP_TABLE);
-    const auto cloneObjId = static_cast<int32_t>(*reinterpret_cast<const uint32_t*>(objentry));
-    if (table[1] != 0 && table[1] != cloneObjId) return 7; // a friend holds group 0x974
-    table[1] = cloneObjId; g_reservedObjId = cloneObjId;
     reinterpret_cast<PFN_VoidP>(base + RVA_WEAPON_DESTROY)(old);
     *slotPtr = 0;
     if (weaponClass != 0x35 && (*reinterpret_cast<const uint8_t*>(actor + ACTOR_FLAGS + 3) & 1) && slot == 0) {
@@ -1693,6 +1708,10 @@ static int BeginJob() {
     }
     reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_CANCEL)(CLONE_WEAPON_GROUP); // our group only, never the player's 0x8FD
     reinterpret_cast<PFN_ModelLoad>(base + RVA_MODEL_LOAD)(weaponClass, slot, newObjId, CLONE_WEAPON_GROUP, extraId);
+    // 0x39D460(task) waits, pumps, then waits again: the pump starts the queued entries (state 0 ->
+    // loading), so without it the idle check passes at once and the weapon is built before its
+    // model exists (crash in 0x39CC40, 2026-10-10). Pump now; the idle wait happens across frames.
+    reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_PUMP)(0);
     g_pending = Pending {true, i, actor, item, newObjId, visible, g_frameCounter};
     return 0;
 }
@@ -1707,6 +1726,7 @@ static int FinishJob() {
     const int slot = 0;
     auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
     reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_PUMP)(0); // finalize completed entries, no task so no yield
+    if (!GroupLoaded(CLONE_WEAPON_GROUP)) return 8; // no loaded entry for our group: the weapon would bind to nothing
     const uintptr_t mem = reinterpret_cast<PFN_Alloc>(base + RVA_ALLOC)(0xC10);
     if (mem == 0) return 5;
     const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
@@ -1778,7 +1798,7 @@ static void Tick(int i, uintptr_t actor) {
             if (g_pending.puppet != i) return;
             if (g_pending.actor != actor || !CloneAlive(actor)) { Drop("the clone left"); return; }
             if (g_frameCounter - g_pending.since > 900) { Drop("loader never went idle"); g_retryAt[i] = g_frameCounter + 600; return; }
-            if (!LoaderIdle()) return;
+            if (g_frameCounter - g_pending.since < 2 || !LoaderIdle()) return;
             const Pending p = g_pending;
             const int step = Finish();
             g_pending = {};
@@ -1800,10 +1820,10 @@ static void Tick(int i, uintptr_t actor) {
             if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap begun on clone %p (puppet %d): item 0x%X (had 0x%X) objId 0x%X -> group 0x%X", g_frameCounter, reinterpret_cast<void*>(actor), i, want, g_appliedActor[i] == actor ? g_appliedItem[i] : 0, g_pending.objId, CLONE_WEAPON_GROUP); }
             return;
         }
-        if (step == 3 || step == 7) { g_appliedActor[i] = actor; g_appliedItem[i] = want; }
+        if (step == 3) { g_appliedActor[i] = actor; g_appliedItem[i] = want; }
         else g_retryAt[i] = g_frameCounter + 600;
         if (step < 0) g_pending = {}; // a fault after the destroy leaves the slot empty; the next attempt refuses at step 1
-        if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d, item 0x%X) refused at step %d%s", g_frameCounter, reinterpret_cast<void*>(actor), i, want, step, step == 3 ? " (no weapon object for this class)" : step == 7 ? " (group 0x974 held by a friend)" : ""); }
+        if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d, item 0x%X) refused at step %d%s", g_frameCounter, reinterpret_cast<void*>(actor), i, want, step, step == 3 ? " (no weapon object for this class)" : ""); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_pending = {};
         g_retryAt[i] = g_frameCounter + 600;
@@ -1814,8 +1834,6 @@ static void Tick(int i, uintptr_t actor) {
 static void Reset() {
     g_appliedActor[0] = g_appliedActor[1] = 0; g_appliedItem[0] = g_appliedItem[1] = 0; g_retryAt[0] = g_retryAt[1] = 0;
     g_pending = {};
-    if (!g_ready) return;
-    __try { auto* table = reinterpret_cast<int32_t*>(g_exeBase + RVA_PLAYER_GROUP_TABLE); if (g_reservedObjId != 0 && table[1] == g_reservedObjId) table[1] = 0; g_reservedObjId = 0; } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static void Install(uintptr_t exeBase) {
