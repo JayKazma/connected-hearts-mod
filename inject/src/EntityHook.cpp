@@ -1695,7 +1695,15 @@ static constexpr uintptr_t RVA_PLAYER_GROUP_TABLE = 0x2A24FA8;
 // may hold a second copy of a file already loaded elsewhere: 0x8FD is Sora's keyblade, 0x138A the
 // keyblade group of the Roxas fight (his keyblades may match Sora's). A clone holding the same
 // keyblade as the local player is exactly that case, so the clone's keyblade loads into 0x138A.
-static constexpr int CLONE_WEAPON_GROUP = 0x138A;
+static constexpr int CLONE_WEAPON_GROUP_DEFAULT = 0x138A;
+// The loader lays every non-negative group out back to back, low groups first (0x39D590), so any
+// file another group loads mid-room moves every later group's files; 0x138A sits after the enemy
+// groups, so an enemy loading moved the clone's keyblade under its weapon object (crash on the next
+// attack, 2026-10-10). Negative groups are stacked from the top of the pool in list order instead;
+// a group listed among the non-negative ones (queued as 0x138A, then renamed, see HookedQueue) is
+// placed above every other negative group, and nothing else moves it. Used when the pool has room.
+static constexpr int CLONE_WEAPON_GROUP_STABLE = -0x7000;
+static int g_cloneGroup = CLONE_WEAPON_GROUP_DEFAULT;
 
 struct Sig { uintptr_t rva; uint8_t bytes[8]; };
 static constexpr Sig kSigs[] = {
@@ -1785,6 +1793,30 @@ static bool LoaderIdle() {
     return true;
 }
 
+// Every field-group file the game has queued is loaded (state 3), ours aside. A file queued after
+// our weapon is built still lays out before ours when the stable group isn't available.
+static bool LoaderSettled() {
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        const int32_t group = *reinterpret_cast<const int32_t*>(e + 0x48);
+        if (group <= 9999 && group != g_cloneGroup && *reinterpret_cast<const uint8_t*>(e + 1) != 3) return false;
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    return true;
+}
+// Where our model file sits; the loader moving it under a built weapon leaves the weapon pointing
+// at other data.
+static uintptr_t FirstGroupResource(int group) {
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        if (*reinterpret_cast<const int32_t*>(e + 0x48) == group) return *reinterpret_cast<const uintptr_t*>(e + 0x58);
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    return 0;
+}
+static uintptr_t g_builtAt = 0;
+static uint32_t g_settleLoad = 0, g_settleFrame = 0;
+
 // Load entries of a group: logged once per swap; true when at least one exists and none is mid-load.
 static bool GroupLoaded(int group, bool log = true) {
     const auto base = g_exeBase;
@@ -1837,9 +1869,43 @@ static constexpr uint8_t kFindBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x4
 using PFN_ResFind = uintptr_t(__fastcall*)(const char* path, int group);
 static PFN_ResFind g_origFind = nullptr;
 static bool g_preferCloneGroup = false;
+// 0x39E000(path, group, size) -> entry. A path already loaded in another field group is reused
+// (state reset) unless the group is 0x8FD or 0x138A; the clone needs its own copy, so its stable
+// group is queued as 0x138A and the new entry renamed. Entries keep their list position (0x39DD70
+// sorts by group at insertion), which is what puts them first among the negative groups.
+static constexpr uintptr_t RVA_RES_QUEUE = 0x39E000;
+static constexpr uint8_t kQueueBytes[] = {0x40, 0x55, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x30, 0x01, 0x00, 0x00};
+using PFN_ResQueue = uintptr_t(__fastcall*)(const char* path, int group, uint64_t size);
+static PFN_ResQueue g_origQueue = nullptr;
+static uintptr_t __fastcall HookedQueue(const char* path, int group, uint64_t size) {
+    if (group != CLONE_WEAPON_GROUP_STABLE) return g_origQueue(path, group, size);
+    const uintptr_t e = g_origQueue(path, CLONE_WEAPON_GROUP_DEFAULT, size);
+    __try {
+        if (e && *reinterpret_cast<const int32_t*>(e + 0x48) == CLONE_WEAPON_GROUP_DEFAULT) {
+            *reinterpret_cast<int32_t*>(e + 0x48) = CLONE_WEAPON_GROUP_STABLE;
+            if (*reinterpret_cast<const int32_t*>(e + 0x68) == CLONE_WEAPON_GROUP_DEFAULT) *reinterpret_cast<int32_t*>(e + 0x68) = CLONE_WEAPON_GROUP_STABLE;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return e;
+}
+// Free space between the top of the non-negative layout and the bottom of the negative stack
+// (0x29F33F0, written by 0x39D590). The pump evicts entries that overlap the stack.
+static constexpr uintptr_t RVA_NEG_STACK_BOTTOM = 0x29F33F0;
+static int64_t PoolHeadroom() {
+    uintptr_t top = 0;
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        const int32_t group = *reinterpret_cast<const int32_t*>(e + 0x48);
+        const uintptr_t at = *reinterpret_cast<const uintptr_t*>(e + 0x58);
+        if (group >= 0 && at) { const uintptr_t end = at + *reinterpret_cast<const uint64_t*>(e + 0x50); if (end > top) top = end; }
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    const uintptr_t bottom = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_NEG_STACK_BOTTOM);
+    return top && bottom ? static_cast<int64_t>(bottom) - static_cast<int64_t>(top) : -1;
+}
 static uintptr_t __fastcall HookedFind(const char* path, int group) {
     if (g_preferCloneGroup && group == -1 && path) {
-        const uintptr_t mine = g_origFind(path, CLONE_WEAPON_GROUP);
+        const uintptr_t mine = g_origFind(path, g_cloneGroup);
         if (mine && *reinterpret_cast<const uint8_t*>(mine + 1) == 3) return mine;
     }
     return g_origFind(path, group);
@@ -1859,7 +1925,7 @@ static int ChooseBankSlot() {
     bool byEntry[64] {}, byBank[64] {};
     uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
     for (int guard = 0; e != 0 && guard < 4096; ++guard) {
-        if (*reinterpret_cast<const uint8_t*>(e) == 1 && *reinterpret_cast<const int32_t*>(e + 0x48) != CLONE_WEAPON_GROUP && *reinterpret_cast<const int32_t*>(e + 0x48) < 10000) {
+        if (*reinterpret_cast<const uint8_t*>(e) == 1 && *reinterpret_cast<const int32_t*>(e + 0x48) != g_cloneGroup && *reinterpret_cast<const int32_t*>(e + 0x48) < 10000) {
             const int x = *reinterpret_cast<const int16_t*>(e + 0x68); // retired entries (group >= 10000) no longer re-request
             if (x >= 0 && x < 64) byEntry[x] = true;
         }
@@ -2010,14 +2076,21 @@ static int BeginJob() {
     // on the old weapon's own group before loading the new one. Group 0x138A may hold files that are
     // not ours, so nothing is released here; superseded clone keyblade files stay until the room
     // changes (a few hundred KB each). What the group holds is logged before the first load.
-    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X before release:", CLONE_WEAPON_GROUP); }
-    GroupLoaded(CLONE_WEAPON_GROUP);
-    reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP); // only ever holds the clone's keyblade files
-    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after release:", CLONE_WEAPON_GROUP); }
-    GroupLoaded(CLONE_WEAPON_GROUP);
-    reinterpret_cast<PFN_ModelLoad>(base + RVA_MODEL_LOAD)(weaponClass, slot, newObjId, CLONE_WEAPON_GROUP, extraId);
-    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after request (class %d objId 0x%X extra %d):", CLONE_WEAPON_GROUP, weaponClass, newObjId, extraId); }
-    GroupLoaded(CLONE_WEAPON_GROUP);
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X before release:", g_cloneGroup); }
+    GroupLoaded(g_cloneGroup);
+    reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_RELEASE)(g_cloneGroup); // only ever holds the clone's keyblade files
+    if (g_cloneGroup != CLONE_WEAPON_GROUP_DEFAULT) reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP_DEFAULT);
+    {
+        const int64_t headroom = PoolHeadroom();
+        const int chosen = headroom > (6ll << 20) ? CLONE_WEAPON_GROUP_STABLE : CLONE_WEAPON_GROUP_DEFAULT;
+        if (chosen != g_cloneGroup || g_logged < 60) { ++g_logged; Log("[weapon] loader pool headroom %lld KB; clone keyblade group %d", static_cast<long long>(headroom >> 10), chosen); }
+        g_cloneGroup = chosen;
+    }
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after release:", g_cloneGroup); }
+    GroupLoaded(g_cloneGroup);
+    reinterpret_cast<PFN_ModelLoad>(base + RVA_MODEL_LOAD)(weaponClass, slot, newObjId, g_cloneGroup, extraId);
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after request (class %d objId 0x%X extra %d):", g_cloneGroup, weaponClass, newObjId, extraId); }
+    GroupLoaded(g_cloneGroup);
     // 0x39D460(task) waits, pumps, then waits again: the pump starts the queued entries (state 0 ->
     // loading), so without it the idle check passes at once and the weapon is built before its
     // model exists (crash in 0x39CC40, 2026-10-10). Pump now; the idle wait happens across frames.
@@ -2037,7 +2110,7 @@ static int FinishJob() {
     const int slot = 0;
     auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
     reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_PUMP)(0); // finalize completed entries, no task so no yield
-    if (!GroupLoaded(CLONE_WEAPON_GROUP)) return 8; // no loaded entry for our group: the weapon would bind to nothing
+    if (!GroupLoaded(g_cloneGroup)) return 8; // no loaded entry for our group: the weapon would bind to nothing
     const uint8_t visible = p.visible;
     const uintptr_t mem = reinterpret_cast<PFN_Alloc>(base + RVA_ALLOC)(0xC10);
     if (mem == 0) return 5;
@@ -2047,7 +2120,7 @@ static int FinishJob() {
     const uintptr_t newEntry = reinterpret_cast<PFN_ObjentryById>(base + RVA_OBJENTRY_BY_ID)(p.objId);
     if (newEntry == 0) return 5;
     g_preferCloneGroup = true;
-    const uintptr_t w = reinterpret_cast<PFN_WeaponCreate>(base + RVA_WEAPON_CREATE)(mem, newEntry, actor, cls, slot, CLONE_WEAPON_GROUP);
+    const uintptr_t w = reinterpret_cast<PFN_WeaponCreate>(base + RVA_WEAPON_CREATE)(mem, newEntry, actor, cls, slot, g_cloneGroup);
     g_preferCloneGroup = false;
     *slotPtr = w;
     if (w == 0) return 6;
@@ -2056,14 +2129,15 @@ static int FinishJob() {
     // frees under the clone (motion tick on a freed clip, the day's first crash). Bind our copy.
     {
         const char* msetPath = reinterpret_cast<PFN_MsetPath>(base + RVA_MSET_PATH)(cls, slot, nullptr);
-        const uintptr_t mine = msetPath && GroupHasPath(msetPath, CLONE_WEAPON_GROUP) ? reinterpret_cast<PFN_ResLookup>(base + RVA_RES_LOOKUP)(msetPath, CLONE_WEAPON_GROUP) : 0;
+        const uintptr_t mine = msetPath && GroupHasPath(msetPath, g_cloneGroup) ? reinterpret_cast<PFN_ResLookup>(base + RVA_RES_LOOKUP)(msetPath, g_cloneGroup) : 0;
         if (mine) *reinterpret_cast<uintptr_t*>(w + 0x158) = mine; // 0x3C8460: motion+0 = moveset
-        if (g_logged < 60) { ++g_logged; Log("[weapon] moveset %s bound to group 0x%X copy %p (weapon %p)", msetPath ? msetPath : "(none)", CLONE_WEAPON_GROUP, reinterpret_cast<void*>(mine), reinterpret_cast<void*>(w)); }
+        if (g_logged < 60) { ++g_logged; Log("[weapon] moveset %s bound to group 0x%X copy %p (weapon %p)", msetPath ? msetPath : "(none)", g_cloneGroup, reinterpret_cast<void*>(mine), reinterpret_cast<void*>(w)); }
     }
     reinterpret_cast<PFN_BindA>(base + RVA_MOTION_BIND_A)(w + 0x158, *reinterpret_cast<const int32_t*>(actor + 0x188));
     reinterpret_cast<PFN_BindB>(base + RVA_MOTION_BIND_B)(w + 0x158, *reinterpret_cast<const uint32_t*>(actor + 0x180), 0, *reinterpret_cast<const uint32_t*>(actor + 0x19C));
     if (visible == 0) { const uintptr_t wt = TypeOf(w); if (wt) VFn<PFN_TypeShow>(wt, 0x88)(wt, w); }
     if (reinterpret_cast<PFN_Char0>(base + RVA_POST_FLAG)()) reinterpret_cast<void(__fastcall*)()>(base + RVA_POST_NOTIFY)();
+    g_builtAt = FirstGroupResource(g_cloneGroup);
     return 9;
 }
 static int Finish() { crashdump::KeepFirst(); const int r = RunOnBigStack(&FinishJob); g_preferCloneGroup = false; SoundDiag("after build"); return r; }
@@ -2076,11 +2150,11 @@ static int BailJob() {
     const uintptr_t actor = g_beginActor;
     auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
     const uintptr_t old = *slotPtr;
-    if (old && TypeOf(old) && *reinterpret_cast<const int32_t*>(old + 0xC0C) == CLONE_WEAPON_GROUP) {
+    if (old && TypeOf(old) && *reinterpret_cast<const int32_t*>(old + 0xC0C) == g_cloneGroup) {
         reinterpret_cast<PFN_VoidP>(g_exeBase + RVA_WEAPON_DESTROY)(old);
         *slotPtr = 0;
     }
-    reinterpret_cast<PFN_VoidI>(g_exeBase + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP);
+    reinterpret_cast<PFN_VoidI>(g_exeBase + RVA_LOAD_RELEASE)(g_cloneGroup);
     return 0;
 }
 static void Bail(int i, uintptr_t actor) {
@@ -2161,21 +2235,29 @@ static void Tick(int i, uintptr_t actor) {
     if (g_diagOnly) return;
     __try {
         if (g_bailedActor[i] == actor) return;
-        if (SoundPoolFree() < 16 && (g_pending.active || g_appliedActor[i] == actor) && GroupHasAny(CLONE_WEAPON_GROUP)) { Bail(i, actor); return; }
+        if (SoundPoolFree() < 16 && (g_pending.active || g_appliedActor[i] == actor) && GroupHasAny(g_cloneGroup)) { Bail(i, actor); return; }
         if (g_pending.active) {
             if (g_pending.puppet != i) return;
             if (g_pending.actor != actor || !CloneAlive(actor)) { Drop("the clone left"); return; }
             if (g_frameCounter - g_pending.since > 900) { Drop("loader never went idle"); g_retryAt[i] = g_frameCounter + 600; return; }
             if (g_frameCounter - g_pending.since < 2) return;
             reinterpret_cast<PFN_VoidP>(g_exeBase + RVA_LOAD_PUMP)(0); // the loader starts the group's files one at a time
-            if (!LoaderIdle() || !GroupLoaded(CLONE_WEAPON_GROUP, false)) return;
+            if (!LoaderIdle() || !LoaderSettled() || !GroupLoaded(g_cloneGroup, false)) return;
             const Pending p = g_pending;
             const int step = Finish();
             g_pending = {};
             if (step == 9) { g_appliedActor[i] = actor; g_appliedItem[i] = p.item; }
             else g_retryAt[i] = g_frameCounter + 600; // -1 faulted on the fiber, -3 no fiber
-            if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d): item 0x%X objId 0x%X group 0x%X after %u frames -> %s (step %d)", g_frameCounter, reinterpret_cast<void*>(actor), i, p.item, p.objId, CLONE_WEAPON_GROUP, g_frameCounter - p.since, step == 9 ? "equipped" : "failed", step); }
+            if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d): item 0x%X objId 0x%X group 0x%X after %u frames -> %s (step %d)", g_frameCounter, reinterpret_cast<void*>(actor), i, p.item, p.objId, g_cloneGroup, g_frameCounter - p.since, step == 9 ? "equipped" : "failed", step); }
             return;
+        }
+        if (g_builtAt && g_appliedActor[i] == actor) {
+            const uintptr_t now = FirstGroupResource(g_cloneGroup);
+            static uintptr_t reported = 0;
+            if (now != g_builtAt && reported != g_builtAt) {
+                reported = g_builtAt;
+                Log("[weapon] frame %u clone keyblade files moved by the loader (%p -> %p, group %d)", g_frameCounter, reinterpret_cast<void*>(g_builtAt), reinterpret_cast<void*>(now), g_cloneGroup);
+            }
         }
         const uint16_t want = g_puppets[i].pose.pose.weaponItem;
         if (want == 0 || (g_appliedActor[i] == actor && g_appliedItem[i] == want)) return;
@@ -2184,10 +2266,12 @@ static void Tick(int i, uintptr_t actor) {
         if (*reinterpret_cast<const int32_t*>(base + offsets::CUTSCENE_STATE) != 0 || *reinterpret_cast<const uintptr_t*>(base + offsets::EVENT_CONTEXT) != 0) return;
         if (warp::LoadPending() || warp::TransitionPending()) return;
         if (*reinterpret_cast<const uintptr_t*>(actor + ACTOR_WEAPON_SLOTS) == 0) return; // no weapon to replace yet
-        if (!LoaderIdle()) return; // the game's own loads first; the clone group's load must be the only one we wait on
+        if (!LoaderIdle() || !LoaderSettled()) return; // the game's own loads first; the clone group's load must be the only one we wait on
+        if (warp::LoadSerial() != g_settleLoad) { g_settleLoad = warp::LoadSerial(); g_settleFrame = g_frameCounter; }
+        if (g_frameCounter - g_settleFrame < 90) return; // a room's first spawns queue their files over its first frames
         const int step = Begin(i, actor, want);
         if (step == 0) {
-            if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap begun on clone %p (puppet %d): item 0x%X (had 0x%X) objId 0x%X -> group 0x%X", g_frameCounter, reinterpret_cast<void*>(actor), i, want, g_appliedActor[i] == actor ? g_appliedItem[i] : 0, g_pending.objId, CLONE_WEAPON_GROUP); }
+            if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap begun on clone %p (puppet %d): item 0x%X (had 0x%X) objId 0x%X -> group 0x%X", g_frameCounter, reinterpret_cast<void*>(actor), i, want, g_appliedActor[i] == actor ? g_appliedItem[i] : 0, g_pending.objId, g_cloneGroup); }
             return;
         }
         if (step == 3) { g_appliedActor[i] = actor; g_appliedItem[i] = want; }
@@ -2224,6 +2308,11 @@ static void Install(uintptr_t exeBase) {
     MH_STATUS st = MH_CreateHook(find, reinterpret_cast<void*>(&HookedFind), reinterpret_cast<void**>(&g_origFind));
     if (st == MH_OK) st = MH_EnableHook(find);
     if (st != MH_OK) { Log("[weapon] resource find hook failed: %d; weapon sync off", st); return; }
+    void* queue = reinterpret_cast<void*>(exeBase + RVA_RES_QUEUE);
+    if (std::memcmp(queue, kQueueBytes, sizeof(kQueueBytes)) != 0) { Log("[weapon] resource queue bytes don't match; weapon sync off"); return; }
+    st = MH_CreateHook(queue, reinterpret_cast<void*>(&HookedQueue), reinterpret_cast<void**>(&g_origQueue));
+    if (st == MH_OK) st = MH_EnableHook(queue);
+    if (st != MH_OK) { Log("[weapon] resource queue hook failed: %d; weapon sync off", st); return; }
     g_ready = g_resolveHandle != nullptr;
     Log("[weapon] sync ready (%s)%s", g_ready ? "all signatures matched" : "no handle resolver; off", g_diagOnly ? "; diagnostics only (KH2COOP_WEAPON_SYNC=1)" : "");
 }
@@ -2313,7 +2402,7 @@ static EventLoc ReadLoc() {
 }
 static uint8_t g_lastSkipFlag = 0;
 static uint32_t g_lastLoadSerial = 0;
-static ULONGLONG g_lastLoadMs = 0, g_eventEndMs = 0;
+static ULONGLONG g_lastLoadMs = 0, g_eventEndMs = 0, g_eventStartMs = 0;
 static bool g_lastEventShared = false;  // the event that just ended was one the peer watched too
 static bool g_applyingRemoteSkip = false;
 static uint8_t g_endWorld = 0xFF, g_endRoom = 0xFF;
@@ -2343,7 +2432,7 @@ static void Observe() {
         if (active && !g_active) {
             const EventLoc loc = ReadLoc();
             const bool afterLoad = now - g_lastLoadMs < 3000 && loc.evt != 0;
-            if (afterLoad) { ++g_eventSeq; g_eventLoc = loc; }
+            if (afterLoad) { ++g_eventSeq; g_eventLoc = loc; g_eventStartMs = now; }
             g_lastEventShared = PeerFresh() && (g_peer.eventActive || afterLoad);
             Log("[cutscene] event started (state %d, context %p) at %02X/%02X evt %u%s; seq %u", state, reinterpret_cast<void*>(ctx),
                 loc.world, loc.room, loc.evt, afterLoad ? " after a room load" : "", g_eventSeq);
@@ -2417,7 +2506,15 @@ static void OnFrame() {
         // follow (client only, the host's room-entry events)
         if (g_peer.eventSeq != g_followedSeq && enemysync::HasClientAuthority()) {
             if (!g_followDeadline) g_followDeadline = now + 5000;
-            if (!g_peer.eventActive || now > g_followDeadline) {
+            // This game got there on its own (the followed event's closing jump loads the next event
+            // here too): the same location within the last 20 s is the same event, not a new one.
+            const bool sameHere = g_eventStartMs && now - g_eventStartMs < 20000 &&
+                g_eventLoc.world == g_peer.eventWorld && g_eventLoc.room == g_peer.eventRoom && g_eventLoc.door == g_peer.eventDoor &&
+                g_eventLoc.map == g_peer.eventMap && g_eventLoc.btl == g_peer.eventBtl && g_eventLoc.evt == g_peer.eventEvt;
+            if (sameHere) {
+                Log("[cutscene] host event %u is the one this game already played (%02X/%02X evt %u); not loaded again", g_peer.eventSeq, g_peer.eventWorld, g_peer.eventRoom, g_peer.eventEvt);
+                g_followedSeq = g_peer.eventSeq; g_followDeadline = 0;
+            } else if (!g_peer.eventActive || now > g_followDeadline) {
                 Log("[cutscene] host event %u not followed (%s)", g_peer.eventSeq, g_peer.eventActive ? "this game was not free to load it within 5 s" : "it already ended");
                 g_followedSeq = g_peer.eventSeq; g_followDeadline = 0;
             } else if (!g_active && warp::IssueEventFollow(g_peer.eventWorld, g_peer.eventRoom, g_peer.eventDoor,

@@ -216,6 +216,7 @@ void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t 
                                         int mode, std::uint8_t flag, int extra) {
     if (enemysync::HasClientAuthority() && g_eventExitUntilMs != 0 && GetTickCount64() < g_eventExitUntilMs) {
         g_eventExitUntilMs = 0; // one scripted exit per followed event: the same jump the host's event made
+        g_eventFollowLoad = g_loadSerial; // where this load lands counts as followed too
         if (g_log) g_log("[warp] client native exit allowed (followed event) target=%02X/%02X door=%u map=%u btl=%u evt=%u",
                          to->world, to->room, to->door, to->map, to->battle, to->event);
         BeginTransition();
