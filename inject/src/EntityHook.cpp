@@ -435,6 +435,7 @@ struct PuppetDriver {
     uint32_t nativeCastUntil = 0; // frames while the clone's own command path owns its motion
 };
 static PuppetDriver g_puppets[2];
+static uintptr_t g_cloneCommandActor = 0; // clone executing a replayed command right now (clonecast)
 static bool g_inPuppetAnimSet = false;
 
 // VUH-1787 sender side: the last published local avatar, re-published with
@@ -1429,7 +1430,13 @@ static int CommandKind(uint16_t id) {
 static bool ReplayableKind(int kind) { return kind == 2 || kind == 3; }
 
 static uintptr_t __fastcall HookedFcExecute(void* actor, const uint16_t* record) {
-    const auto result = g_origFcExecute(actor, record);
+    // Clone side: the command's own animation set happens inside this call; the motion-chain hook
+    // lets it through for this actor only while the call runs (the game's per-frame fall/land sets
+    // on a collision-less clone stay blocked, they fought the cast when a time window was used).
+    const bool cloneCommand = reinterpret_cast<uintptr_t>(actor) != g_soraActor && record && record[0] != 0 && PuppetIndexFor(reinterpret_cast<uintptr_t>(actor)) >= 0;
+    if (cloneCommand) g_cloneCommandActor = reinterpret_cast<uintptr_t>(actor);
+    uintptr_t result = 0;
+    __try { result = g_origFcExecute(actor, record); } __finally { if (cloneCommand) g_cloneCommandActor = 0; }
     __try { // clone side: did the game run the replayed record? (id non-zero only during a replay window)
         if (reinterpret_cast<uintptr_t>(actor) != g_soraActor && record && record[0] != 0 && g_logged < 60) {
             ++g_logged;
@@ -2622,9 +2629,9 @@ static uint8_t __fastcall HookedMotionChainSetAnim(void* motCtrl, int animId,
         // command (clonecast) is in flight the game's own sets are the cast itself, so they pass.
         const int puppet = PuppetIndexFor(actorAddr);
         if (puppet >= 0) {
-            if (!g_inOurAnimSet && g_frameCounter < g_puppets[puppet].nativeCastUntil) {
+            if (!g_inOurAnimSet && g_cloneCommandActor == actorAddr) { // the replayed command's own set (clonecast)
                 static unsigned logged = 0;
-                if (logged < 20) { ++logged; Log("[cast] frame %u native anim %d on clone (puppet %d) during replay", g_frameCounter, animId, puppet); }
+                if (logged < 20) { ++logged; Log("[cast] frame %u native anim %d on clone (puppet %d) from the replayed command", g_frameCounter, animId, puppet); }
                 return g_origMotionChainSetAnim ? g_origMotionChainSetAnim(motCtrl, animId, startTime, blendParam) : 0;
             }
             if (!g_inOurAnimSet) return 1;
