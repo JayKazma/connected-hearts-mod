@@ -426,6 +426,8 @@ struct PuppetDriver {
     bool applied = false;       // prior native drive, independent of current pose permission
     nativehittrace::ActorSnapshot boundActor {}; // checked metadata for bounded release
     puppethold::HeldClock heldClock {}; // VUH-1787: frames the pose has been AvatarHeld
+    int pendingMotion = -1;      // locomotion change waiting to be confirmed
+    int pendingFrames = 0;       // consecutive frames it has been requested
 };
 static PuppetDriver g_puppets[2];
 static bool g_inPuppetAnimSet = false;
@@ -1111,6 +1113,7 @@ static constexpr uint32_t PUPPET_STALE_FRAMES = 120;
 static constexpr uint32_t PUPPET_MAX_BASIC_MOTION = 8;
 static constexpr uint32_t PUPPET_CLONE_UNSAFE_MOTION = 9;
 static constexpr float PUPPET_TIME_DRIFT_FRAMES = 3.0f;
+static constexpr int PUPPET_LOCO_CONFIRM_FRAMES = 3;    // frames a locomotion switch must hold before the clone follows
 static constexpr float PUPPET_LOOP_WRAP_FRAMES = 20.0f;  // a backward jump this large is the clip looping
 static constexpr uintptr_t ACTOR_MOTCTRL = 0x158;        // embedded motion controller
 static constexpr uintptr_t MOTCTRL_CURRENT_TIME = 0x44;  // float frames
@@ -2691,6 +2694,20 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     }
     // VUH-1787: a held pose idles in place after a short grace (downed keeps its clip).
     motion = puppethold::HeldMotion(motion, pose.flags, d.heldClock.Frames(g_frameCounter), ANIM_IDLE);
+
+    // A locomotion switch (idle/walk/run) must hold for a few frames before the clone follows:
+    // the stream can flip run -> idle -> run within one or two frames (seen on a machine whose
+    // two games ran at uneven frame rates), and every flip restarted the run clip (a twitch).
+    // Attacks and other actions still switch at once.
+    {
+        const auto isLoco = [](int m) { return m == ANIM_IDLE || m == ANIM_WALK || m == ANIM_RUN; };
+        if (static_cast<int>(motion) != d.lastAnim && isLoco(static_cast<int>(motion)) && isLoco(d.lastAnim)) {
+            if (d.pendingMotion != static_cast<int>(motion)) { d.pendingMotion = static_cast<int>(motion); d.pendingFrames = 0; }
+            if (++d.pendingFrames < PUPPET_LOCO_CONFIRM_FRAMES) motion = static_cast<uint32_t>(d.lastAnim);
+        } else {
+            d.pendingMotion = -1; d.pendingFrames = 0;
+        }
+    }
 
     auto* motCtrl = reinterpret_cast<void*>(actor + ACTOR_MOTCTRL);
     auto* time = reinterpret_cast<float*>(actor + ACTOR_MOTCTRL + MOTCTRL_CURRENT_TIME);
