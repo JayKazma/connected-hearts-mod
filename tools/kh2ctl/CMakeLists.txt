@@ -3,6 +3,8 @@ add_executable(kh2ctl
     src/world_resync.cpp
 )
 
+set_target_properties(kh2ctl PROPERTIES OUTPUT_NAME "chctl")
+
 target_link_libraries(kh2ctl PRIVATE
     kh2coop_runtime
     user32

@@ -2829,7 +2829,15 @@ static void ForgetPuppetActor(PuppetDriver& d) {
 static bool UpdatePuppetSuspension() {
     const auto transition = warp::TransitionSerial();
     const auto load = warp::LoadSerial();
-    const bool pending = warp::TransitionPending();
+    // A local event (cutscene, a boss's defeat scene) also suspends them: events tear down and rebuild
+    // party actors in place, and the clone was driven through that (host crash after a boss fell,
+    // 2026-10-10).
+    bool localEvent = false;
+    __try {
+        localEvent = *reinterpret_cast<const std::int32_t*>(g_exeBase + offsets::CUTSCENE_STATE) != 0 ||
+                     *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::EVENT_CONTEXT) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    const bool pending = warp::TransitionPending() || localEvent;
     if (transition != g_puppetTransitionSerial || load != g_puppetLoadSerial || pending) {
         render::InvalidateCoopHud();
         ClearNativeAiStamps();
@@ -2849,7 +2857,7 @@ static bool UpdatePuppetSuspension() {
         g_handleCount = 0;
     }
     if (pending != g_puppetsSuspended) {
-        Log("Puppets %s: transition=%u load=%u", pending ? "suspended" : "resumed", transition, load);
+        Log("Puppets %s: transition=%u load=%u%s", pending ? "suspended" : "resumed", transition, load, localEvent ? " (local event)" : "");
     }
     g_puppetTransitionSerial = transition;
     g_puppetLoadSerial = load;
@@ -4654,15 +4662,15 @@ bool Initialize(uintptr_t exeBase) {
             GetEnvironmentVariableA("KH2COOP_LOG_DIR", logDir, MAX_PATH);
         char logPath[MAX_PATH] = {};
         if (dirLen > 0 && dirLen < MAX_PATH) {
-            snprintf(logPath, sizeof(logPath), "%s\\kh2coop_inject_%lu.log",
+            snprintf(logPath, sizeof(logPath), "%s\\connected_hearts_%lu.log",
                      logDir, GetCurrentProcessId());
         } else {
-            snprintf(logPath, sizeof(logPath), "kh2coop_inject_%lu.log",
+            snprintf(logPath, sizeof(logPath), "connected_hearts_%lu.log",
                      GetCurrentProcessId());
         }
         g_logFile = fopen(logPath, "w");
     }
-    Log("=== kh2coop_inject v0.2 ===");
+    Log("=== Connected Hearts mod ===");
     Log("Initializing...");
     Log("  exe base: 0x%llX", static_cast<unsigned long long>(exeBase));
 

@@ -138,6 +138,7 @@ add_executable(kh2coop_server
 )
 
 target_link_libraries(kh2coop_server PRIVATE kh2coop_server_core)
+set_target_properties(kh2coop_server PROPERTIES OUTPUT_NAME "connected_hearts_relay")
 
 # ---------------------------------------------------------------------------
 # kh2coop_runtime — runtime library (GameBridgePC + controllers).
@@ -162,6 +163,7 @@ add_executable(kh2coop_runtime_scaffold
 )
 
 target_link_libraries(kh2coop_runtime_scaffold PRIVATE kh2coop_runtime kh2coop_server_core)
+set_target_properties(kh2coop_runtime_scaffold PROPERTIES OUTPUT_NAME "connected_hearts_runtime")
 
 # ---------------------------------------------------------------------------
 # kh2coop_fake_sim — end-to-end test: 3 fake clients + server, no KH2.

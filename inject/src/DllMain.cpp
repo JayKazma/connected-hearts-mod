@@ -1,8 +1,8 @@
 // ============================================================================
-// DllMain — kh2coop_inject DLL entry point
+// DllMain — Connected Hearts DLL entry point
 //
 // Loading methods:
-//   1. Panacea plugin (recommended): place kh2coop_inject.dll in the
+//   1. Panacea plugin (recommended): place connected_hearts.dll in the
 //      mod's dll/ folder. Panacea calls OnInit/OnFrame automatically.
 //   2. Manual injection: use LoadLibrary or any DLL injector. DllMain
 //      spawns an init thread that installs hooks after a short delay.

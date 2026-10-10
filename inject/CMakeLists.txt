@@ -110,7 +110,7 @@ target_compile_definitions(kh2coop_inject PRIVATE
 )
 
 set_target_properties(kh2coop_inject PROPERTIES
-    OUTPUT_NAME "kh2coop_inject"
+    OUTPUT_NAME "connected_hearts"
     PREFIX ""
     # Use a staging directory so we can build while the DLL is loaded in-game.
     # Copy the new build manually or restart KH2 to pick it up.

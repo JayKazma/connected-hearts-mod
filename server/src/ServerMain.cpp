@@ -15,7 +15,7 @@ static volatile bool g_running = true;
 static void signalHandler(int) { g_running = false; }
 
 static void printUsage() {
-    std::cout << "Usage: kh2coop_server [options]\n"
+    std::cout << "Usage: connected_hearts_relay [options]\n"
               << "  --port <port>       Listen port (default 7782)\n"
               << "  --bind <ip>         Listen only on this address (e.g. your Tailscale 100.x IP);\n"
               << "                      default: all interfaces\n"

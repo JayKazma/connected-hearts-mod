@@ -7,7 +7,7 @@ side of the project: the DLL that runs inside KH2, the runtime that carries the
 session over Steam, and the local relay used for solo tests.
 
 **Players: download the launcher** — it installs and updates everything:
-[KH2CoopSetup.exe](https://github.com/JayKazma/kh2-coop/raw/main/dist/KH2CoopSetup.exe) (launcher repo: [kh2-coop](https://github.com/JayKazma/kh2-coop)).
+[ConnectedHeartsSetup.exe](https://github.com/JayKazma/connected-hearts/raw/main/dist/ConnectedHeartsSetup.exe) (launcher repo: [connected-hearts](https://github.com/JayKazma/connected-hearts)).
 
 ## What works
 
@@ -33,10 +33,10 @@ equipment.
 | Path | What |
 | --- | --- |
 | `inject/` | The DLL loaded into KH2: hooks, clone party, cast replay, weapon sync, HUD, save guard, crash log |
-| `runtime/` | `kh2coop_runtime_scaffold.exe`: bridges the DLL's shared memory to the network, Steam broker |
-| `server/` | `kh2coop_server.exe`: the relay (used locally for the solo test) |
+| `runtime/` | `connected_hearts_runtime.exe`: bridges the DLL's shared memory to the network, Steam broker |
+| `server/` | `connected_hearts_relay.exe`: the relay (used locally for the solo test) |
 | `common/` | Protocol, codec, avatar state, interpolation shared by all of the above |
-| `tools/kh2ctl/` | `kh2ctl.exe`: launches KH2 with the DLL, kills rig instances |
+| `tools/kh2ctl/` | `chctl.exe`: launches KH2 with the DLL, kills rig instances |
 | `tests/` | Offline tests (no game needed); each prints `ALL CHECKS PASSED` |
 | `docs/` | Design notes, reverse-engineering notes, archived plans |
 
@@ -47,7 +47,7 @@ equipment.
  ┌──────────────────────────┐
  │ KH2 process              │
  │  ┌────────────────────┐  │ shared memory  ┌─────────┐  Steam / ENet  ┌──────────────┐
- │  │ kh2coop_inject.dll │◄─┼───────────────►│ runtime │◄──────────────►│ other player │
+ │  │connected_hearts.dll│◄─┼───────────────►│ runtime │◄──────────────►│ other player │
  │  └────────────────────┘  │                └─────────┘                └──────────────┘
  └──────────────────────────┘
 ```
@@ -70,11 +70,11 @@ cmake --build build --config Release
 Cross-build from Linux (what the launcher releases use; clang + mingw headers):
 
 ```sh
-tools/inject/build.sh <this repo> <build dir>     # script lives in the kh2-coop launcher repo
+tools/inject/build.sh <this repo> <build dir>     # script lives in the connected-hearts launcher repo
 ```
 
-Binaries land in `<build dir>/out/`: `kh2coop_inject.dll`,
-`kh2coop_runtime_scaffold.exe`, `kh2coop_server.exe`, `kh2ctl.exe`. Both
+Binaries land in `<build dir>/out/`: `connected_hearts.dll`,
+`connected_hearts_runtime.exe`, `connected_hearts_relay.exe`, `chctl.exe`. Both
 players must run the same protocol version (`common/include/kh2coop/Protocol.hpp`).
 
 ## Runtime switches
@@ -89,7 +89,7 @@ Set as environment variables by the launcher; all default on.
 | `KH2COOP_SAVEGUARD=0` | Let the game write its saves (by default they are sandboxed; the settings file always writes through) |
 | `KH2COOP_STEAM_BROKER=1` | Online session over Steam (the launcher sets it for host/join) |
 
-Logs go next to the launcher under `build\rig\logs\` (`kh2coop_inject_<pid>.log`,
+Logs go next to the launcher under `build\rig\logs\` (`connected_hearts_<pid>.log`,
 runtime and relay logs, crash dumps).
 
 ## License

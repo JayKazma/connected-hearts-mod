@@ -319,7 +319,7 @@ std::string slotToString(kh2coop::SlotType slot) {
 
 void printUsage() {
     std::cout
-        << "Usage: kh2coop_runtime_scaffold [options]\n"
+        << "Usage: connected_hearts_runtime [options]\n"
         << "  --config <path>       Runtime config file (default kh2coop_runtime.ini)\n"
         << "  --mode <mode>         Runtime mode: campaign_coop (default) or public_realm\n"
         << "  --role <slot>         Override client role: 0|1|2 or player|friend1|friend2\n"

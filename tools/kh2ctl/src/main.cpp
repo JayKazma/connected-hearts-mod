@@ -503,20 +503,20 @@ using kh2coop::preinject::InjectDll;
 std::filesystem::path StageDllCopy(const std::optional<std::string>& dllOverride) {
     const std::filesystem::path source = dllOverride
         ? std::filesystem::path(*dllOverride)
-        : RepoRoot() / "build" / "inject" / "staging" / "kh2coop_inject.dll";
+        : RepoRoot() / "build" / "inject" / "staging" / "connected_hearts.dll";
     if (!std::filesystem::exists(source)) {
         throw std::runtime_error("Inject DLL not found: " + source.string() +
                                  " (build the kh2coop_inject target)");
     }
     const auto dir = RigDir() / "dll";
     std::filesystem::create_directories(dir);
-    const auto dest = dir / ("kh2coop_inject_" + std::to_string(NowMs()) + ".dll");
+    const auto dest = dir / ("connected_hearts_" + std::to_string(NowMs()) + ".dll");
     std::filesystem::copy_file(source, dest);
     return dest;
 }
 
 std::filesystem::path LogPathForPid(DWORD pid) {
-    return RigDir() / "logs" / ("kh2coop_inject_" + std::to_string(pid) + ".log");
+    return RigDir() / "logs" / ("connected_hearts_" + std::to_string(pid) + ".log");
 }
 
 // Waits for the DLL's init log to report its hooks; returns hook lines/errors.

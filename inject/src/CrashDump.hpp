@@ -4,7 +4,7 @@
 // instance (VUH-1488), so a crashed scenario leaves evidence.
 //
 // The dump goes to KH2COOP_LOG_DIR (the rig's log folder) as
-// kh2coop_crash_<pid>.dmp, next to the inject log. The game installs its own
+// connected_hearts_crash_<pid>.dmp, next to the inject log. The game installs its own
 // unhandled-exception filter later in init; SetUnhandledExceptionFilter is
 // hooked so that filter is chained after ours instead of replacing it.
 // ============================================================================

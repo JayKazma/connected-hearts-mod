@@ -31,7 +31,7 @@ LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* info) {
         const DWORD n = GetEnvironmentVariableA("KH2COOP_LOG_DIR", dir, MAX_PATH);
         if (n == 0 || n >= MAX_PATH) strcpy_s(dir, ".");
         char path[MAX_PATH];
-        sprintf_s(path, "%s\\kh2coop_crash_%lu.dmp", dir, GetCurrentProcessId());
+        sprintf_s(path, "%s\\connected_hearts_crash_%lu.dmp", dir, GetCurrentProcessId());
         const DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
         const void* address =
             info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
@@ -93,7 +93,7 @@ LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* info) {
             HMODULE m = nullptr;
             if (v < 0x10000 || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(v), &m) || !m) continue;
             char name[MAX_PATH] = "?"; GetModuleFileNameA(m, name, MAX_PATH);
-            const bool ours = strstr(name, "KINGDOM HEARTS II") || strstr(name, "kh2coop_inject");
+            const bool ours = strstr(name, "KINGDOM HEARTS II") || strstr(name, "connected_hearts");
             if (!ours && any >= 16) continue; // other modules: the first 16 code pointers only (who called into clr/ntdll/...)
             char d[MAX_PATH + 32]; Describe(reinterpret_cast<const void*>(v), d, sizeof(d));
             g_log("[crash]   stack[%u] %s", i, d);
