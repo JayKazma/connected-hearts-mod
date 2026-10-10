@@ -1400,7 +1400,7 @@ static constexpr uintptr_t RVA_FC_EXECUTE = 0x3D6FC0;
 static constexpr uint8_t kFcExecuteBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x81, 0xA1, 0x24, 0x01, 0x00, 0x00};
 using PFN_FcExecute = uintptr_t(__fastcall*)(void* actor, const uint16_t* record);
 static PFN_FcExecute g_origFcExecute = nullptr;
-static bool g_enabled = false; // KH2COOP_CAST_REPLAY=1 enables: replaying Fire (id 122) on a clone crashed the receiver (2026-10-09)
+static bool g_enabled = true; // KH2COOP_CAST_REPLAY=0 disables (magic/item kinds only, see CommandKind)
 struct Local { uint16_t seq = 0, id = 0, category = 0; uint8_t flags = 0, form = 0; };
 static Local g_local; // owner thread only
 static unsigned g_logged = 0;
@@ -1493,8 +1493,8 @@ static bool Take(uintptr_t actor, uint16_t& id, uint16_t& category, uint8_t& fla
 
 static void Install(uintptr_t exeBase) {
     char v[2] {};
-    g_enabled = GetEnvironmentVariableA("KH2COOP_CAST_REPLAY", v, sizeof(v)) == 1 && v[0] == '1';
-    if (!g_enabled) { Log("[cast] replay off (KH2COOP_CAST_REPLAY=1 enables); the owner's commands are still streamed"); }
+    g_enabled = !(GetEnvironmentVariableA("KH2COOP_CAST_REPLAY", v, sizeof(v)) == 1 && v[0] == '0'); // default on; =0 disables
+    if (!g_enabled) { Log("[cast] replay off (KH2COOP_CAST_REPLAY=0); the owner's commands are still streamed"); }
     void* addr = reinterpret_cast<void*>(exeBase + RVA_FC_EXECUTE);
     if (std::memcmp(addr, kFcExecuteBytes, sizeof(kFcExecuteBytes)) != 0) { g_enabled = false; Log("[cast] FcExecute bytes don't match; cast replay off"); return; }
     MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&HookedFcExecute), reinterpret_cast<void**>(&g_origFcExecute));
