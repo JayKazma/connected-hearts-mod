@@ -1,156 +1,103 @@
-# KH2 Multiplayer
+# KH2 Co-op (mod)
 
-Online multiplayer mod for Kingdom Hearts II Final Mix (PC, Steam Global).
-The grand vision is PvP: players fighting each other as Sora, Roxas, Riku and
-other characters, in arenas and public realms. The road there runs through
-co-op, because PvP needs the same groundwork: every player's character synced
-live, shared enemies and rooms, and authority over damage. So the first goal
-is story co-op: each player runs their own game, sees the others in the same
-room, fights the same enemies and travels the story together.
+Online co-op for Kingdom Hearts II Final Mix (PC, Steam). Two players run their
+own copies of the game; the other player appears in your party as a second
+Sora, in the same room, fighting the same enemies. This repository is the game
+side of the project: the DLL that runs inside KH2, the runtime that carries the
+session over Steam, and the local relay used for solo tests.
 
-Two real games on one Windows PC pass movement, shared combat, chests and story
-progress through a private Mac relay, with and without added delay and loss.
-A first private friend preview package is sealed and waiting on handoff. A
-human session on separate Windows PCs is still open. See
-[private joining and solo testing](docs/JOIN_GUIDE.md) and the
-[known issues](docs/FRIEND_PLAYTEST_KNOWN_ISSUES.md).
+**Players: download the launcher** — it installs and updates everything:
+[KH2CoopSetup.exe](https://github.com/JayKazma/kh2-coop/raw/main/dist/KH2CoopSetup.exe) (launcher repo: [kh2-coop](https://github.com/JayKazma/kh2-coop)).
 
-## Start here
+## What works
 
-| What you want | Where to go |
-|---------------|-------------|
-| Understand the plan and current state | `docs/ONLINE_COOP_PLAN.md`: decisions, risks, phase gates |
-| See what's being worked on | Linear project **KH2 Multiplayer** (vuhlp workspace) |
-| Play with a friend | `docs/JOIN_GUIDE.md` (dev build) or `docs/FRIEND_PLAYTEST.md` (preview package) |
-| Build and test the inject DLL | `docs/DEVELOPMENT_WORKFLOW.md` |
-| Navigate the codebase | `docs/CODEBASE_MAP.md` |
-| Run live regression scenarios | `docs/SCENARIOS.md` |
-| Look up memory offsets | `docs/pointer_map_v1.md` + `runtime/include/kh2coop/KH2Offsets.hpp` |
-| Understand RE methodology | `docs/LESSONS_LEARNED.md` |
+- **Second Sora.** The other player is a clone of Sora in your party, driven by
+  their stream: position, animation, HP and MP (own HUD gauge with a portrait).
+- **Keyblade sync.** Each clone carries its owner's equipped keyblade; changing
+  keyblades mid-room follows.
+- **Spells and items replay.** The other player's magic and item casts run on
+  their clone through the game's own command path, so motion, effects and
+  sound play natively.
+- **Rooms and story.** Both players travel the story together; room changes
+  follow the host.
+- **Two windows on one PC** through a local relay (solo test), tiled borderless
+  side by side.
+- **Steam sessions.** Online play is Steam-to-Steam by SteamID; no port
+  forwarding.
 
-## What works today
+Each player plays on their own save, with their own level, abilities and
+equipment.
 
-**Co-op (protocol 10)**
-- Each player is the native Sora in their own game; the others appear as
-  puppets in the friend slots, with names, HP and an RTT/loss overlay.
-- Shared enemy HP and deaths: a client's hits are sent as claims, the host
-  applies each once through the game's own damage routine and broadcasts
-  absolute HP. Ordinary combat, including client kills, works.
-- Rooms: host-follow, late join and same-room reload across multiple rooms.
-- Shared progress: chests, visited rooms and story flags sync from the host's
-  save data before the client's room loads, while personal data is kept.
-- Private transport over Tailscale through a relay on any machine, including
-  a Mac. ENet is the transport; Steam networking is opt-in and unreleased
-  (`docs/STEAM_TRANSPORT.md`).
+## Layout
 
-**Still open:** attack-specific effects and boss finishers, enemy spawn
-authority for populated rooms, automatic reconnect mid-fight, cutscene hold,
-broader story side effects, and separate-PC play.
+| Path | What |
+| --- | --- |
+| `inject/` | The DLL loaded into KH2: hooks, clone party, cast replay, weapon sync, HUD, save guard, crash log |
+| `runtime/` | `kh2coop_runtime_scaffold.exe`: bridges the DLL's shared memory to the network, Steam broker |
+| `server/` | `kh2coop_server.exe`: the relay (used locally for the solo test) |
+| `common/` | Protocol, codec, avatar state, interpolation shared by all of the above |
+| `tools/kh2ctl/` | `kh2ctl.exe`: launches KH2 with the DLL, kills rig instances |
+| `tests/` | Offline tests (no game needed); each prints `ALL CHECKS PASSED` |
+| `docs/` | Design notes, reverse-engineering notes, archived plans |
 
-**Tools**
-- `kh2ctl`: launch KH2, inject the DLL, load saves, drive input, capture
-  screenshots and clips (`docs/KH2_CONTROL_CLI.md`).
-- Scenario runner: scripted multi-instance live tests with reports
-  (`tools/scenario`, `docs/SCENARIOS.md`).
-- Host/join launcher (`tools/launcher`) and the self-contained friend preview
-  ZIP (`tools/packaging`).
-- SaveGuard: the DLL sandboxes writes to the save folder. Still, never save
-  in-game during testing.
-
-**Earlier milestones:** F5 friend control (Donald moves and animates under
-player input, `docs/HANDOFF_FRIEND_CONTROL.md`) and the M0–M3 network and
-runtime layers (`docs/IMPLEMENTATION_BACKLOG.md`).
-
-## Architecture
-
-Every player is the native player character on their own machine and streams
-it; other players appear as puppets in the friend slots. The host's game owns
-enemies, rooms and story state; the relay forwards session traffic and checks
-versions. PvP and Public Realm (`docs/ARCHITECTURE_MODES.md`) build on this
-model with arena instances and server-validated damage; they start once co-op
-passes its friend playtest.
+## How it fits together
 
 ```
-  Player's PC                                         Any machine (PC or Mac)
+  Player's PC
  ┌──────────────────────────┐
  │ KH2 process              │
- │  ┌────────────────────┐  │ shared memory  ┌─────────┐   ENet    ┌───────────────┐
- │  │ inject DLL (hooks) │◄─┼───────────────►│ runtime │◄─────────►│ kh2coop_server│
- │  └────────────────────┘  │  (bridges)     └─────────┘ Tailscale │    (relay)    │
- └──────────────────────────┘                                      └───────▲───────┘
-                                              other players' runtimes ─────┘
+ │  ┌────────────────────┐  │ shared memory  ┌─────────┐  Steam / ENet  ┌──────────────┐
+ │  │ kh2coop_inject.dll │◄─┼───────────────►│ runtime │◄──────────────►│ other player │
+ │  └────────────────────┘  │                └─────────┘                └──────────────┘
+ └──────────────────────────┘
 ```
 
-## Quick start
+The DLL reads the local Sora every frame and publishes an `AvatarState`
+(position, motion, HP/MP, last cast, equipped weapon). The runtime sends it to
+the other player and receives theirs; the DLL drives the clone from it. The
+host's game owns enemies and rooms.
+
+## Building
+
+Windows, Visual Studio 2022:
 
 ```powershell
-# Build everything
 cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 cmake --build build --config Release
-
-# Offline tests (no KH2 needed); each prints ALL CHECKS PASSED
-.\build\Release\kh2coop_fake_sim.exe
-.\build\Release\kh2coop_world_test.exe
-
-# Build just the inject DLL
-cmake --build build --target kh2coop_inject --config Release
-
-# Launch KH2 with the inject DLL loaded (no Cheat Engine)
-.\build\tools\kh2ctl\Release\kh2ctl.exe launch
-
-# Kill rig instances, rebuild the DLL, relaunch + inject
-.\build\tools\kh2ctl\Release\kh2ctl.exe restart
-
-# Two real games through a local relay, scripted movement
-python tools/scenario/run.py tools/scenario/scenarios/net_two_instances.json
+.\build\Release\kh2coop_world_test.exe      # offline tests
 ```
 
-See `docs/DEVELOPMENT_WORKFLOW.md` for the full inject/test loop and
-`docs/CODEBASE_MAP.md` for every offline test target.
+Cross-build from Linux (what the launcher releases use; clang + mingw headers):
 
-## Documentation
+```sh
+tools/inject/build.sh <this repo> <build dir>     # script lives in the kh2-coop launcher repo
+```
 
-| Doc | Purpose |
-|-----|---------|
-| `docs/ONLINE_COOP_PLAN.md` | Plan of record: current state, decisions, risk register, phase gates |
-| `docs/JOIN_GUIDE.md` | Private play over Tailscale with the dev build, and testing without a friend |
-| `docs/FRIEND_PLAYTEST.md` | One-page guide shipped with the friend preview package |
-| `docs/FRIEND_PLAYTEST_KNOWN_ISSUES.md` | Limits of the friend preview |
-| `docs/research/PRIOR_ART.md` | How other projects added online play to single-player games, and the pitfalls |
-| `docs/CODEBASE_MAP.md` | What's in each directory, key source files, build and test targets |
-| `docs/DEVELOPMENT_WORKFLOW.md` | Build/inject/test loop |
-| `docs/KH2_CONTROL_CLI.md` | kh2ctl command reference |
-| `docs/SCENARIOS.md` | Scenario runner, fixtures and save safety |
-| `docs/ENEMY_PARITY.md` | Matching host enemies to client copies |
-| `docs/HP_ORDERING.md` | Absolute enemy HP sequencing |
-| `docs/FORCED_RESYNC.md` | Forced world resync and automatic recovery |
-| `docs/DESYNC_REPORTS.md` | Automatic desync report collection |
-| `docs/CAUSAL_RECOVERY_DIAGNOSTICS.md` | Opt-in recovery diagnostics |
-| `docs/STEAM_TRANSPORT.md` | Opt-in Steam transport work |
-| `docs/LESSONS_LEARNED.md` | Hard-won RE and hooking insights |
-| `docs/pointer_map_v1.md` | Confirmed memory offsets |
-| `docs/INPUT_RE_SESSION.md` | Full Ghidra trace of the KH2 input pipeline |
-| `docs/OPENKH_REFERENCE.md` | Guide to the sibling OpenKH repository |
-| `docs/HANDOFF_FRIEND_CONTROL.md` | F5 friend control: hooks, structs, addresses |
-| `docs/IMPLEMENTATION_BACKLOG.md` | Milestone history (M0–M3); M4+ superseded by the plan |
-| `docs/ACCEPTANCE_TESTS.md` | Original milestone criteria; phase gates and Linear now supersede them |
-| `docs/kh2_three_client_coop_design.md` | Original 3-client co-op design (authority and actor model superseded) |
-| `docs/ARCHITECTURE_MODES.md` | CampaignCoop vs PublicRealm and PvP architecture |
-| `docs/ROXAS_DUAL_WIELD_FORM.md` | Parked Roxas form design |
-| `docs/archive/`, `docs/probes/` | Retired plans and one-off RE session notes |
-| `AGENTS.md` | AI agent rules: safety, scenarios, CE/Ghidra, rig, swarm coordination |
+Binaries land in `<build dir>/out/`: `kh2coop_inject.dll`,
+`kh2coop_runtime_scaffold.exe`, `kh2coop_server.exe`, `kh2ctl.exe`. Both
+players must run the same protocol version (`common/include/kh2coop/Protocol.hpp`).
+
+## Runtime switches
+
+Set as environment variables by the launcher; all default on.
+
+| Variable | Effect |
+| --- | --- |
+| `KH2COOP_PARTY_NATIVE`, `KH2COOP_NATIVE_SORA_PRIVATE_STATUS`, `KH2COOP_CLONE_NEUTRAL_INPUT`, `KH2COOP_ALLY_HIT` | The one-clone party |
+| `KH2COOP_CAST_REPLAY=0` | Don't replay the other player's casts on their clone |
+| `KH2COOP_WEAPON_SYNC=0` / `=1` | Keyblade sync off / diagnostics only |
+| `KH2COOP_SAVEGUARD=0` | Let the game write its saves (by default they are sandboxed; the settings file always writes through) |
+| `KH2COOP_STEAM_BROKER=1` | Online session over Steam (the launcher sets it for host/join) |
+
+Logs go next to the launcher under `build\rig\logs\` (`kh2coop_inject_<pid>.log`,
+runtime and relay logs, crash dumps).
 
 ## License
 
-Copyright (C) 2026 Volpestyle. This project is free software: you can
-redistribute it and/or modify it under the terms of the GNU General Public
+GPL-3.0-or-later. Copyright (C) 2026 Volpestyle (original multiplayer
+framework); Copyright (C) 2026 JayKazma (co-op: clone party, cast replay,
+keyblade sync, HUD, launcher integration). This program is free software: you
+can redistribute it and/or modify it under the terms of the GNU General Public
 License as published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version. It is distributed WITHOUT ANY
-WARRANTY; see [`LICENSE`](LICENSE) for details. SPDX: `GPL-3.0-or-later`.
-
-The license covers this repository's code and docs only. Kingdom Hearts and
-Kingdom Hearts II are the property of Square Enix and Disney; this is an
-unofficial fan project, not affiliated with or endorsed by them. No game assets,
-game files or executables are included or distributed — you need your own copy
-of the game. Bundled dependencies (ENet, MinHook, CPython and others) keep
-their own licenses, which ship in the player package's `licenses/` folder.
+WARRANTY; see [`LICENSE`](LICENSE).
