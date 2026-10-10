@@ -1507,6 +1507,70 @@ static void Install(uintptr_t exeBase) {
 } // namespace clonecast
 
 // ============================================================================
+// Command table lookup guard: 0x3B68B0(id) -> row, or NULL when the id is not in the table
+// ============================================================================
+// Callers dereference the result without a check (0x407B40's attack scan: AV reading NULL+2 after
+// a keyblade change with a clone present, 2026-10-10). The lookup is replicated here; a miss is
+// logged with the caller and answered with a fallback row instead of NULL. Magic rows redirect to
+// the leveled spell through the local magic-level table (0x3C5900); a spell this player has not
+// learned redirects to id 0, which also misses.
+namespace cmdlookup {
+static constexpr uintptr_t RVA_LOOKUP = 0x3B68B0;
+static constexpr uint8_t kBytes[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x15};
+static constexpr uintptr_t RVA_TABLE_PTR = 0x2A161E8, RVA_MAGIC_LEVELS = 0x2A23AC8;
+using PFN_Lookup = const uint8_t*(__fastcall*)(int id);
+static PFN_Lookup g_orig = nullptr;
+static unsigned g_logged = 0;
+
+static const uint8_t* Find(int id) {
+    const auto table = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_TABLE_PTR);
+    if (table < 0x10000) return nullptr;
+    const auto count = *reinterpret_cast<const int32_t*>(table + 4);
+    if (count <= 0 || count > 4096) return nullptr;
+    const uint8_t* rows = reinterpret_cast<const uint8_t*>(table + 8);
+    int lo = 0, hi = count - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        const auto key = *reinterpret_cast<const uint16_t*>(rows + static_cast<size_t>(mid) * 0x30);
+        if (key == id) return rows + static_cast<size_t>(mid) * 0x30;
+        if (key < id) lo = mid + 1; else hi = mid - 1;
+    }
+    return nullptr;
+}
+
+static const uint8_t* __fastcall Hooked(int id) {
+    const uint8_t* row = Find(id);
+    const void* caller = _ReturnAddress();
+    if (!row) {
+        const auto table = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_TABLE_PTR);
+        row = table >= 0x10000 && *reinterpret_cast<const int32_t*>(table + 4) > 0 ? reinterpret_cast<const uint8_t*>(table + 8) : nullptr;
+        if (g_logged < 40) { ++g_logged; Log("[cmd] frame %u lookup of id %d (0x%X) missed; caller exe+0x%llX; answering with row id %u", g_frameCounter, id, id, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(caller) - g_exeBase), row ? *reinterpret_cast<const uint16_t*>(row) : 0); }
+        return row;
+    }
+    if (*reinterpret_cast<const int16_t*>(row + 2) == 2 && *reinterpret_cast<const int16_t*>(row) != 2) {
+        const int magic = *reinterpret_cast<const int16_t*>(row + 4);
+        const auto rec = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_MAGIC_LEVELS + static_cast<uintptr_t>(magic) * 80);
+        const int leveled = rec ? *reinterpret_cast<const uint16_t*>(rec + 0x26) : 0;
+        const uint8_t* lrow = leveled ? Find(leveled) : nullptr;
+        if (!lrow) {
+            if (g_logged < 40) { ++g_logged; Log("[cmd] frame %u magic id %d (0x%X) level %d redirects to id %d which is not in the table; caller exe+0x%llX; keeping the base row", g_frameCounter, id, id, magic, leveled, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(caller) - g_exeBase)); }
+            return row;
+        }
+        return lrow;
+    }
+    return row;
+}
+
+static void Install(uintptr_t exeBase) {
+    void* addr = reinterpret_cast<void*>(exeBase + RVA_LOOKUP);
+    if (std::memcmp(addr, kBytes, sizeof(kBytes)) != 0) { Log("[cmd] lookup bytes don't match; guard off"); return; }
+    MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&Hooked), reinterpret_cast<void**>(&g_orig));
+    if (st == MH_OK) st = MH_EnableHook(addr);
+    Log(st == MH_OK ? "[cmd] lookup guard ready" : "[cmd] lookup hook failed: %d", st);
+}
+} // namespace cmdlookup
+
+// ============================================================================
 // Weapon sync: a clone carries the keyblade its owner has equipped
 // ============================================================================
 // Owner side: the equipped weapon's item id sits at +0 of the character's save record
@@ -1530,7 +1594,9 @@ static constexpr uintptr_t RVA_WEAPON_VISIBLE = 0x3BA840;  // (weapon) -> char
 static constexpr uintptr_t RVA_WEAPON_DESTROY = 0x3EFF20;  // (weapon)
 static constexpr uintptr_t RVA_OBJENTRY_BY_ID = 0x3DFEB0;  // (objId) -> objentry
 static constexpr uintptr_t RVA_PARTY_OBJID = 0x405190;     // (0) -> party slot 0 objentry id
-static constexpr uintptr_t RVA_LOAD_RELEASE = 0x39D010;    // (group): unload every entry of a group (unused: see BeginJob)
+static constexpr uintptr_t RVA_LOAD_RELEASE = 0x39D010;    // (group): unload every entry of a group
+static constexpr uintptr_t RVA_RES_LOOKUP = 0x39CC40;      // (path, group or -1) -> resource (refcount+1)
+static constexpr uintptr_t RVA_MSET_PATH = 0x3EF910;       // (weaponClass, slot, 0) -> "obj/<name>.mset" or NULL
 static constexpr uintptr_t RVA_ITEM_TO_OBJID = 0x3EF8B0;   // (weaponClass, item) -> objId
 static constexpr uintptr_t RVA_MODEL_LOAD = 0x3E0A20;      // (weaponClass, slot, newObjId, group, extra)
 static constexpr uintptr_t RVA_LOAD_PUMP = 0x39D460;       // (0): finalize completed loads without yielding
@@ -1539,6 +1605,18 @@ static constexpr uintptr_t RVA_WEAPON_CREATE = 0x3EF750;   // (mem, objentry, ac
 static constexpr uintptr_t RVA_MOTION_BIND_A = 0x3C8440;   // (weapon+0x158, actor+0x188)
 static constexpr uintptr_t RVA_MOTION_BIND_B = 0x3C86A0;   // (weapon+0x158, actor+0x180, 0, actor+0x19C)
 static constexpr uintptr_t RVA_POST_FLAG = 0x1515C0, RVA_POST_NOTIFY = 0x163510;
+// Sound-bank requests. A keyblade's .a.us is installed into the sound engine through a request
+// pool of 48 records (0x728480, 0x30 each; free-index stack 0x728D80, count 0x728E40) that a game
+// task (0x1E0140) drains, one per frame, after every bank "transfer thread" has finished
+// (0x13A4A0 ORs the busy word +0x6C of every bank entry on the list at 0x713450). When the pool
+// is empty, 0x1E03E0 indexes with garbage and faults (the follower's crash, 2026-10-10).
+static constexpr uintptr_t RVA_SND_POOL_COUNT = 0x728E40;  // int: free records left
+static constexpr uintptr_t RVA_SND_BUSY = 0x13A4A0;        // () -> OR of bank entries' busy words
+static constexpr uintptr_t RVA_SND_BANK_HEAD = 0x713450;   // bank entry: +8 next, +0x48 slot, +0x54 size, +0x68 bank, +0x6C busy
+static constexpr uintptr_t RVA_SND_BANK_COUNT = 0x713460;  // int
+static constexpr uintptr_t RVA_SND_REQ_HEAD = 0xAD9438;    // request: +0x10 next handle, +0x18 slot, +0x1C kind, +0x28 size
+static constexpr uintptr_t RVA_SND_DONE_HEAD = 0xAD9448;   // requests served this pass: +0x14 next handle
+static constexpr int SND_POOL_MIN = 4;                     // refuse a swap when fewer records are free
 static constexpr uintptr_t ACTOR_OBJENTRY = 0x8, ACTOR_FLAGS = 0x6C8, ACTOR_WEAPON_SLOTS = 0xD60;
 static constexpr uintptr_t OBJENTRY_CHAR_ID = 0x4C, OBJENTRY_WEAPON_CLASS = 0x4E, WEAPON_EXTRA_HANDLE = 0xBB0;
 // Friend character table: [0]/[1] hold the objIds of the characters loaded into groups 0x96A / 0x974
@@ -1559,6 +1637,8 @@ static constexpr Sig kSigs[] = {
     {RVA_OBJENTRY_BY_ID, {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xC1}},
     {RVA_PARTY_OBJID,    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83}},
     {RVA_LOAD_RELEASE,   {0x48, 0x89, 0x5C, 0x24, 0x10, 0x56, 0x48, 0x83}},
+    {RVA_RES_LOOKUP,     {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0xE8, 0x95}},
+    {RVA_MSET_PATH,      {0x48, 0x83, 0xEC, 0x28, 0x48, 0x63, 0xC2, 0x4C}},
     {RVA_ITEM_TO_OBJID,  {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x85, 0xC9}},
     {RVA_MODEL_LOAD,     {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C}},
     {RVA_LOAD_PUMP,      {0x40, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x89}},
@@ -1568,6 +1648,7 @@ static constexpr Sig kSigs[] = {
     {RVA_MOTION_BIND_B,  {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74}},
     {RVA_POST_FLAG,      {0x80, 0x3D, 0xE9, 0xF0, 0x7A, 0x00, 0x00, 0x0F}},
     {RVA_POST_NOTIFY,    {0xC6, 0x05, 0x01, 0x55, 0x5B, 0x00, 0x00, 0xC3}},
+    {RVA_SND_BUSY,       {0x33, 0xD2, 0x48, 0x39, 0x15, 0x5F, 0x18, 0x78}},
 };
 
 using PFN_Char0 = uint8_t(__fastcall*)();
@@ -1584,6 +1665,8 @@ using PFN_BindA = void(__fastcall*)(uintptr_t motion, int);
 using PFN_BindB = void(__fastcall*)(uintptr_t motion, uint32_t, uint32_t, uint32_t);
 using PFN_TypeGroup = int(__fastcall*)(uintptr_t type, uintptr_t obj);
 using PFN_TypeShow = void(__fastcall*)(uintptr_t type, uintptr_t obj);
+using PFN_ResLookup = uintptr_t(__fastcall*)(const char* path, int group);
+using PFN_MsetPath = const char*(__fastcall*)(int weaponClass, int slot, char* out);
 
 static bool g_enabled = true;   // KH2COOP_WEAPON_SYNC=0 disables
 static bool g_diagOnly = false; // KH2COOP_WEAPON_SYNC=1: log the groups, never swap
@@ -1643,16 +1726,160 @@ static bool GroupLoaded(int group, bool log = true) {
             ++found;
             const uint8_t state = *reinterpret_cast<const uint8_t*>(e + 1);
             if (state != 3) ++busy; // 0 = queued, not started yet
-            if (log && g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X entry %p: state %u refs %d flags %08X res %p path %s", group, reinterpret_cast<void*>(e), state, *reinterpret_cast<const int16_t*>(e + 2), *reinterpret_cast<const uint32_t*>(e + 0x44), *reinterpret_cast<void* const*>(e + 0x58), reinterpret_cast<const char*>(e + 4)); }
+            if (log && g_logged < 120) { ++g_logged; Log("[weapon] group 0x%X entry %p: state %u refs %d flags %08X res %p path %s", group, reinterpret_cast<void*>(e), state, *reinterpret_cast<const int16_t*>(e + 2), *reinterpret_cast<const uint32_t*>(e + 0x44), *reinterpret_cast<void* const*>(e + 0x58), reinterpret_cast<const char*>(e + 4)); }
         }
         e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
     }
     return found > 0 && busy == 0;
 }
 
+static bool GroupHasAny(int group) {
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        if (*reinterpret_cast<const int32_t*>(e + 0x48) == group) return true;
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    return false;
+}
+
+// An entry of this path in this group, loaded (state 3)? 0x39CC40 dereferences NULL on a miss.
+static bool GroupHasPath(const char* path, int group) {
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        if (*reinterpret_cast<const int32_t*>(e + 0x48) == group && *reinterpret_cast<const uint8_t*>(e + 1) == 3 && std::strcmp(reinterpret_cast<const char*>(e + 4), path) == 0) return true;
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    return false;
+}
+
 static bool CloneAlive(uintptr_t actor) {
     for (int i = 0; i < 2; ++i) if (PuppetTarget(i) == actor && IsPuppetActive(i)) return true;
     return false;
+}
+
+// The weapon constructor resolves its files by path with the wildcard group (-1) before it knows
+// its own group: the entity base init (0x3B3200) builds the model instance and the effect
+// instances from the first list entry of each path, which is the local player's copy when both
+// hold the same keyblade. The player's next keyblade change frees those under the clone (the
+// clone's attack animation then walked freed packets, 2026-10-10). While a clone weapon is
+// being built, a wildcard find answers with the clone group's loaded copy when it has one.
+static constexpr uintptr_t RVA_RES_FIND = 0x39E1E0; // (path, group or -1) -> load entry or NULL
+static constexpr uint8_t kFindBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xDA};
+using PFN_ResFind = uintptr_t(__fastcall*)(const char* path, int group);
+static PFN_ResFind g_origFind = nullptr;
+static bool g_preferCloneGroup = false;
+static uintptr_t __fastcall HookedFind(const char* path, int group) {
+    if (g_preferCloneGroup && group == -1 && path) {
+        const uintptr_t mine = g_origFind(path, CLONE_WEAPON_GROUP);
+        if (mine && *reinterpret_cast<const uint8_t*>(mine + 1) == 3) return mine;
+    }
+    return g_origFind(path, group);
+}
+
+// A sound-bank slot for the clone's keyblade. Every loaded `.a` entry re-requests its bank into its
+// slot on every loader pump; the request is a no-op only while the slot's table row still names
+// that bank (0x1E08C0). Two live entries naming the same slot with different banks therefore
+// re-install each other every frame, two requests a frame against one served, until the pool is
+// empty (the follower's crash, 2026-10-10). The game's weapon slots are 4 (player), 5 and 6 (the
+// friend groups), 7 (limits, guests), 4 (the player, who moves to 5 once the clone joins); 10..14 hold the room's area banks, installed once. The clone
+// takes a slot no live entry outside its own group claims, preferring the friend slot the clone's
+// presence leaves unused.
+static constexpr uintptr_t RVA_AREA_RECORD = 0x2A11368;    // -> room record: shorts +0xE..+0x16 = area bank ids for slots 10..14 (-1 none)
+static constexpr uintptr_t RVA_AREA_LAST = 0xABAD06;       // shorts: bank id last installed into slots 10..14
+static int ChooseBankSlot() {
+    bool byEntry[64] {}, byBank[64] {};
+    uintptr_t e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+    for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+        if (*reinterpret_cast<const uint8_t*>(e) == 1 && *reinterpret_cast<const int32_t*>(e + 0x48) != CLONE_WEAPON_GROUP && *reinterpret_cast<const int32_t*>(e + 0x48) < 10000) {
+            const int x = *reinterpret_cast<const int16_t*>(e + 0x68); // retired entries (group >= 10000) no longer re-request
+            if (x >= 0 && x < 64) byEntry[x] = true;
+        }
+        e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+    }
+    uintptr_t b = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_SND_BANK_HEAD);
+    for (int guard = 0; b != 0 && guard < 256; ++guard) {
+        const int x = *reinterpret_cast<const int32_t*>(b + 0x48);
+        if (x >= 0 && x < 64) byBank[x] = true;
+        b = *reinterpret_cast<const uintptr_t*>(b + 8);
+    }
+    for (int p : {6, 5, 7, 4}) if (!byEntry[p]) return p; // a weapon slot nobody re-requests (a stale one-shot bank there is harmless)
+    // Area slots: one-shot installs, so no fight, but the room plays its area sounds from the slots
+    // its record names. Take one the record leaves empty; forget its last bank so the next room
+    // that needs the slot reloads it.
+    const uintptr_t record = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_AREA_RECORD);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int p : {14, 13, 12, 11, 10}) {
+            if (byEntry[p]) continue;
+            const int16_t roomBank = record ? *reinterpret_cast<const int16_t*>(record + 0xE + 2 * (p - 10)) : -1;
+            if (pass == 0 && roomBank != -1) continue;
+            *reinterpret_cast<int16_t*>(g_exeBase + RVA_AREA_LAST + 2 * (p - 10)) = -1;
+            if (g_logged < 60) { ++g_logged; Log("[weapon] bank slot %d taken (room's own bank there: %d%s)", p, roomBank, pass ? "; it goes quiet until the room changes" : ""); }
+            return p;
+        }
+    }
+    static unsigned dumped = 0;
+    if (dumped < 2) { ++dumped; // every slot claimed: list the claimants (twice per process)
+        e = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_LOAD_LIST_HEAD);
+        for (int guard = 0; e != 0 && guard < 4096; ++guard) {
+            if (*reinterpret_cast<const uint8_t*>(e) == 1) { Log("[weapon] bank claimant: group 0x%X extra %d state %u %s", *reinterpret_cast<const int32_t*>(e + 0x48), *reinterpret_cast<const int16_t*>(e + 0x68), *reinterpret_cast<const uint8_t*>(e + 1), reinterpret_cast<const char*>(e + 4)); }
+            e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(e + 0x70));
+        }
+        b = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_SND_BANK_HEAD);
+        for (int guard = 0; b != 0 && guard < 256; ++guard) {
+            Log("[weapon] bank entry: slot %d bank %d size %u busy %u", *reinterpret_cast<const int32_t*>(b + 0x48), *reinterpret_cast<const int32_t*>(b + 0x68), *reinterpret_cast<const uint32_t*>(b + 0x54), *reinterpret_cast<const uint32_t*>(b + 0x6C));
+            b = *reinterpret_cast<const uintptr_t*>(b + 8);
+        }
+    }
+    (void)byBank;
+    return -1;
+}
+
+// State of the sound-bank request pool. Logged on every swap step and whenever the number of free
+// records falls to a new low, so the log shows when and where the pool drains.
+static int SoundPoolFree() { return *reinterpret_cast<const int32_t*>(g_exeBase + RVA_SND_POOL_COUNT); }
+static void SoundDiag(const char* when) {
+    static int lowest = 0x7fffffff;
+    static unsigned logged = 0;
+    __try {
+        const auto base = g_exeBase;
+        const int free = SoundPoolFree();
+        const bool newLow = free < lowest;
+        if (newLow) lowest = free;
+        if (!when && !newLow) return;
+        if (logged >= 200) return;
+        ++logged;
+        const uint32_t busy = reinterpret_cast<uint32_t(__fastcall*)()>(base + RVA_SND_BUSY)();
+        int queued = 0, done = 0, banks = 0, stuck = 0;
+        char stuckList[160] {}; size_t n = 0;
+        char reqList[200] {}; size_t rn = 0;
+        uintptr_t r = *reinterpret_cast<const uintptr_t*>(base + RVA_SND_REQ_HEAD);
+        for (int guard = 0; r != 0 && guard < 64; ++guard) {
+            ++queued;
+            if (queued <= 3 || guard == 63) {
+                const uintptr_t cb = *reinterpret_cast<const uintptr_t*>(r);
+                const uintptr_t arg = *reinterpret_cast<const uintptr_t*>(r + 8);
+                const bool loader = cb == base + 0x39E290 && arg;
+                if (rn < sizeof(reqList) - 60) rn += static_cast<size_t>(std::snprintf(reqList + rn, sizeof(reqList) - rn, " [kind %d slot %d size %u cb exe+0x%llX%s%s]",
+                    *reinterpret_cast<const int32_t*>(r + 0x1C), *reinterpret_cast<const int32_t*>(r + 0x18), *reinterpret_cast<const uint32_t*>(r + 0x28),
+                    static_cast<unsigned long long>(cb >= base ? cb - base : 0), loader ? " entry " : "", loader ? reinterpret_cast<const char*>(arg + 4) : ""));
+            }
+            r = g_resolveHandle(*reinterpret_cast<const uint32_t*>(r + 0x10));
+        }
+        r = *reinterpret_cast<const uintptr_t*>(base + RVA_SND_DONE_HEAD);
+        for (int guard = 0; r != 0 && guard < 64; ++guard) { ++done; r = g_resolveHandle(*reinterpret_cast<const uint32_t*>(r + 0x14)); }
+        uintptr_t b = *reinterpret_cast<const uintptr_t*>(base + RVA_SND_BANK_HEAD);
+        for (int guard = 0; b != 0 && guard < 256; ++guard) {
+            ++banks;
+            if (*reinterpret_cast<const uint32_t*>(b + 0x6C) != 0) {
+                ++stuck;
+                if (n < sizeof(stuckList) - 24) n += static_cast<size_t>(std::snprintf(stuckList + n, sizeof(stuckList) - n, " slot%d/bank%d", *reinterpret_cast<const int32_t*>(b + 0x48), *reinterpret_cast<const int32_t*>(b + 0x68)));
+            }
+            b = *reinterpret_cast<const uintptr_t*>(b + 8);
+        }
+        Log("[weapon] frame %u sound pool %s: %d/48 free%s, busy %u, %d queued%s, %d served this pass, %d bank entries (%d listed), %d transferring%s",
+            g_frameCounter, when ? when : "new low", free, newLow ? " (new low)" : "", busy, queued, reqList, done, banks,
+            *reinterpret_cast<const int32_t*>(base + RVA_SND_BANK_COUNT), stuck, stuckList);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { if (logged < 200) { ++logged; Log("[weapon] sound pool diag faulted"); } }
 }
 
 // The load path needs far more stack than is left inside the entity update (the game runs its
@@ -1691,17 +1918,20 @@ static int BeginJob() {
     auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
     const uintptr_t old = *slotPtr;
     if (old == 0 || TypeOf(old) == 0) return 1;
-    const uintptr_t extra = g_resolveHandle(*reinterpret_cast<const uint32_t*>(old + WEAPON_EXTRA_HANDLE));
-    const int extraId = extra ? *reinterpret_cast<const int16_t*>(extra) : -1;
+    const int extraId = ChooseBankSlot();
+    if (extraId < 0) return 11; // every usable sound-bank slot is claimed
     const uint8_t visible = reinterpret_cast<PFN_CharP>(base + RVA_WEAPON_VISIBLE)(old);
     const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
     if (objentry == 0) return 2;
     int weaponClass = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
     const uint32_t newObjId = reinterpret_cast<PFN_ItemToObjId>(base + RVA_ITEM_TO_OBJID)(weaponClass, item);
     if (newObjId == 0) return 3; // not a weapon of this class
-    // The old weapon stays until the new model is in: the game's own swap destroys and rebuilds in
-    // one step, so its freed block is reused at once. Destroyed-and-waiting for frames, the clone's
-    // old weapon was still walked by the field's interactable scan (crash 2026-10-10, 0x407B40).
+    if (SoundPoolFree() < SND_POOL_MIN) return 10; // the bank install would fault in 0x1E03E0
+    // The game's order: destroy the old weapon, release its group, load the new files. The loader
+    // lays every group's files out back to back in a fixed region per group range (0x39D590), so
+    // files must not pile up in the clone group: the joiner's second load overran it (2026-10-10).
+    reinterpret_cast<PFN_VoidP>(base + RVA_WEAPON_DESTROY)(old);
+    *slotPtr = 0;
     if (weaponClass != 0x35 && (*reinterpret_cast<const uint8_t*>(actor + ACTOR_FLAGS + 3) & 1) && slot == 0) {
         const uint16_t partyObjId = reinterpret_cast<PFN_PartyObjId>(base + RVA_PARTY_OBJID)(0);
         const uintptr_t partyEntry = reinterpret_cast<PFN_ObjentryById>(base + RVA_OBJENTRY_BY_ID)(partyObjId);
@@ -1711,18 +1941,24 @@ static int BeginJob() {
     // on the old weapon's own group before loading the new one. Group 0x138A may hold files that are
     // not ours, so nothing is released here; superseded clone keyblade files stay until the room
     // changes (a few hundred KB each). What the group holds is logged before the first load.
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X before release:", CLONE_WEAPON_GROUP); }
+    GroupLoaded(CLONE_WEAPON_GROUP);
+    reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP); // only ever holds the clone's keyblade files
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after release:", CLONE_WEAPON_GROUP); }
     GroupLoaded(CLONE_WEAPON_GROUP);
     reinterpret_cast<PFN_ModelLoad>(base + RVA_MODEL_LOAD)(weaponClass, slot, newObjId, CLONE_WEAPON_GROUP, extraId);
+    if (g_logged < 60) { ++g_logged; Log("[weapon] group 0x%X after request (class %d objId 0x%X extra %d):", CLONE_WEAPON_GROUP, weaponClass, newObjId, extraId); }
+    GroupLoaded(CLONE_WEAPON_GROUP);
     // 0x39D460(task) waits, pumps, then waits again: the pump starts the queued entries (state 0 ->
     // loading), so without it the idle check passes at once and the weapon is built before its
     // model exists (crash in 0x39CC40, 2026-10-10). Pump now; the idle wait happens across frames.
     reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_PUMP)(0);
-    (void)visible;
-    g_pending = Pending {true, i, actor, item, newObjId, 0, g_frameCounter};
+    g_pending = Pending {true, i, actor, item, newObjId, visible, g_frameCounter};
+    SoundDiag("after request");
     return 0;
 }
 
-static int Begin(int i, uintptr_t actor, uint16_t item) { g_beginPuppet = i; g_beginActor = actor; g_beginItem = item; return RunOnBigStack(&BeginJob); }
+static int Begin(int i, uintptr_t actor, uint16_t item) { crashdump::KeepFirst(); SoundDiag("before swap"); g_beginPuppet = i; g_beginActor = actor; g_beginItem = item; return RunOnBigStack(&BeginJob); }
 
 // Phase B: the loader is idle; create the weapon entity in the clone group and bind it.
 static int FinishJob() {
@@ -1733,13 +1969,7 @@ static int FinishJob() {
     auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
     reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_PUMP)(0); // finalize completed entries, no task so no yield
     if (!GroupLoaded(CLONE_WEAPON_GROUP)) return 8; // no loaded entry for our group: the weapon would bind to nothing
-    const uintptr_t old = *slotPtr;
-    uint8_t visible = 1;
-    if (old != 0 && TypeOf(old) != 0) {
-        visible = reinterpret_cast<PFN_CharP>(base + RVA_WEAPON_VISIBLE)(old);
-        reinterpret_cast<PFN_VoidP>(base + RVA_WEAPON_DESTROY)(old);
-    }
-    *slotPtr = 0;
+    const uint8_t visible = p.visible;
     const uintptr_t mem = reinterpret_cast<PFN_Alloc>(base + RVA_ALLOC)(0xC10);
     if (mem == 0) return 5;
     const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
@@ -1747,16 +1977,52 @@ static int FinishJob() {
     const int cls = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
     const uintptr_t newEntry = reinterpret_cast<PFN_ObjentryById>(base + RVA_OBJENTRY_BY_ID)(p.objId);
     if (newEntry == 0) return 5;
+    g_preferCloneGroup = true;
     const uintptr_t w = reinterpret_cast<PFN_WeaponCreate>(base + RVA_WEAPON_CREATE)(mem, newEntry, actor, cls, slot, CLONE_WEAPON_GROUP);
+    g_preferCloneGroup = false;
     *slotPtr = w;
     if (w == 0) return 6;
+    // 0x3EF750 binds the moveset through a wildcard lookup (path, -1): the first entry of that path
+    // in the list is the local player's copy (group 0x8FD), which the player's own keyblade change
+    // frees under the clone (motion tick on a freed clip, the day's first crash). Bind our copy.
+    {
+        const char* msetPath = reinterpret_cast<PFN_MsetPath>(base + RVA_MSET_PATH)(cls, slot, nullptr);
+        const uintptr_t mine = msetPath && GroupHasPath(msetPath, CLONE_WEAPON_GROUP) ? reinterpret_cast<PFN_ResLookup>(base + RVA_RES_LOOKUP)(msetPath, CLONE_WEAPON_GROUP) : 0;
+        if (mine) *reinterpret_cast<uintptr_t*>(w + 0x158) = mine; // 0x3C8460: motion+0 = moveset
+        if (g_logged < 60) { ++g_logged; Log("[weapon] moveset %s bound to group 0x%X copy %p (weapon %p)", msetPath ? msetPath : "(none)", CLONE_WEAPON_GROUP, reinterpret_cast<void*>(mine), reinterpret_cast<void*>(w)); }
+    }
     reinterpret_cast<PFN_BindA>(base + RVA_MOTION_BIND_A)(w + 0x158, *reinterpret_cast<const int32_t*>(actor + 0x188));
     reinterpret_cast<PFN_BindB>(base + RVA_MOTION_BIND_B)(w + 0x158, *reinterpret_cast<const uint32_t*>(actor + 0x180), 0, *reinterpret_cast<const uint32_t*>(actor + 0x19C));
     if (visible == 0) { const uintptr_t wt = TypeOf(w); if (wt) VFn<PFN_TypeShow>(wt, 0x88)(wt, w); }
     if (reinterpret_cast<PFN_Char0>(base + RVA_POST_FLAG)()) reinterpret_cast<void(__fastcall*)()>(base + RVA_POST_NOTIFY)();
     return 9;
 }
-static int Finish() { return RunOnBigStack(&FinishJob); }
+static int Finish() { crashdump::KeepFirst(); const int r = RunOnBigStack(&FinishJob); g_preferCloneGroup = false; SoundDiag("after build"); return r; }
+
+// Safety net: the pool is draining while the clone holds a keyblade of ours, so its bank is in a
+// slot fight after all. Drop the keyblade and its files the way a room change would (destroy, then
+// release) and leave the clone bare for the rest of the room; the game's own swap would fault next.
+static uintptr_t g_bailedActor[2] {};
+static int BailJob() {
+    const uintptr_t actor = g_beginActor;
+    auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS);
+    const uintptr_t old = *slotPtr;
+    if (old && TypeOf(old) && *reinterpret_cast<const int32_t*>(old + 0xC0C) == CLONE_WEAPON_GROUP) {
+        reinterpret_cast<PFN_VoidP>(g_exeBase + RVA_WEAPON_DESTROY)(old);
+        *slotPtr = 0;
+    }
+    reinterpret_cast<PFN_VoidI>(g_exeBase + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP);
+    return 0;
+}
+static void Bail(int i, uintptr_t actor) {
+    crashdump::KeepFirst();
+    SoundDiag("before bail");
+    g_beginActor = actor;
+    const int r = RunOnBigStack(&BailJob);
+    g_pending = {};
+    g_bailedActor[i] = actor;
+    Log("[weapon] frame %u clone %p (puppet %d): sound request pool draining with our keyblade loaded; keyblade dropped for this room (%d)", g_frameCounter, reinterpret_cast<void*>(actor), i, r);
+}
 
 static constexpr uintptr_t RVA_TYPE_GROUP_TABLE = 0x5C8500; // default group per objentry type byte
 static void Diag(int i, uintptr_t actor) {
@@ -1805,8 +2071,16 @@ static void Drop(const char* why) {
 static void Tick(int i, uintptr_t actor) {
     if (!g_enabled || !g_ready || actor == 0 || i < 0 || i > 1) return;
     Diag(i, actor);
+    {
+        static uint32_t lastPeriodic = 0;
+        const bool periodic = g_frameCounter - lastPeriodic >= 1800;
+        if (periodic) lastPeriodic = g_frameCounter;
+        SoundDiag(periodic ? "periodic" : nullptr);
+    }
     if (g_diagOnly) return;
     __try {
+        if (g_bailedActor[i] == actor) return;
+        if (SoundPoolFree() < 16 && (g_pending.active || g_appliedActor[i] == actor) && GroupHasAny(CLONE_WEAPON_GROUP)) { Bail(i, actor); return; }
         if (g_pending.active) {
             if (g_pending.puppet != i) return;
             if (g_pending.actor != actor || !CloneAlive(actor)) { Drop("the clone left"); return; }
@@ -1818,7 +2092,6 @@ static void Tick(int i, uintptr_t actor) {
             const int step = Finish();
             g_pending = {};
             if (step == 9) { g_appliedActor[i] = actor; g_appliedItem[i] = p.item; }
-            else if (step == 8) { g_appliedActor[i] = actor; g_appliedItem[i] = p.item; } // old weapon kept; don't loop on a load the game refused
             else g_retryAt[i] = g_frameCounter + 600; // -1 faulted on the fiber, -3 no fiber
             if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d): item 0x%X objId 0x%X group 0x%X after %u frames -> %s (step %d)", g_frameCounter, reinterpret_cast<void*>(actor), i, p.item, p.objId, CLONE_WEAPON_GROUP, g_frameCounter - p.since, step == 9 ? "equipped" : "failed", step); }
             return;
@@ -1839,7 +2112,7 @@ static void Tick(int i, uintptr_t actor) {
         if (step == 3) { g_appliedActor[i] = actor; g_appliedItem[i] = want; }
         else g_retryAt[i] = g_frameCounter + 600;
         if (step < 0) g_pending = {};
-        if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d, item 0x%X) refused at step %d%s", g_frameCounter, reinterpret_cast<void*>(actor), i, want, step, step == 3 ? " (no weapon object for this class)" : ""); }
+        if (g_logged < 60) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d, item 0x%X) refused at step %d%s", g_frameCounter, reinterpret_cast<void*>(actor), i, want, step, step == 3 ? " (no weapon object for this class)" : step == 10 ? " (sound request pool nearly empty)" : step == 11 ? " (no free sound-bank slot)" : ""); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_pending = {};
         g_retryAt[i] = g_frameCounter + 600;
@@ -1849,6 +2122,7 @@ static void Tick(int i, uintptr_t actor) {
 
 static void Reset() {
     g_appliedActor[0] = g_appliedActor[1] = 0; g_appliedItem[0] = g_appliedItem[1] = 0; g_retryAt[0] = g_retryAt[1] = 0;
+    g_bailedActor[0] = g_bailedActor[1] = 0;
     g_pending = {};
 }
 
@@ -1864,6 +2138,11 @@ static void Install(uintptr_t exeBase) {
             return;
         }
     }
+    void* find = reinterpret_cast<void*>(exeBase + RVA_RES_FIND);
+    if (std::memcmp(find, kFindBytes, sizeof(kFindBytes)) != 0) { Log("[weapon] resource find bytes don't match; weapon sync off"); return; }
+    MH_STATUS st = MH_CreateHook(find, reinterpret_cast<void*>(&HookedFind), reinterpret_cast<void**>(&g_origFind));
+    if (st == MH_OK) st = MH_EnableHook(find);
+    if (st != MH_OK) { Log("[weapon] resource find hook failed: %d; weapon sync off", st); return; }
     g_ready = g_resolveHandle != nullptr;
     Log("[weapon] sync ready (%s)%s", g_ready ? "all signatures matched" : "no handle resolver; off", g_diagOnly ? "; diagnostics only (KH2COOP_WEAPON_SYNC=1)" : "");
 }
@@ -4275,6 +4554,7 @@ bool Initialize(uintptr_t exeBase) {
     cloneneutral::Install(exeBase); // VUH-1489: default off (KH2COOP_CLONE_NEUTRAL_INPUT)
     clonecast::Install(exeBase);    // cast replay on clones (needs the neutral-input window; KH2COOP_CAST_REPLAY=0 off)
     clonewpn::Install(exeBase);     // clones carry their owner's keyblade (KH2COOP_WEAPON_SYNC=0 off)
+    cmdlookup::Install(exeBase);    // command table misses answered, not dereferenced
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the
