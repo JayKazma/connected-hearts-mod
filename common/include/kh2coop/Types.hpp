@@ -178,6 +178,9 @@ struct AvatarState {
     std::uint16_t castCategory {0};
     std::uint8_t castFlags {0};
     std::uint8_t castForm {0};
+    // v16: the item id of the weapon the owner has equipped (character record +0; Kingdom Key 0x29).
+    // A clone equips the same keyblade through the game's own swap task (clonewpn). 0 = unknown.
+    std::uint16_t weaponItem {0};
 };
 
 struct InputButtons {

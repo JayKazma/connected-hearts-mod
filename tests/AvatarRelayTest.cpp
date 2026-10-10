@@ -76,6 +76,8 @@ void testCodec() {
     a.motionSpeed = 1.5f;
     a.flags = AvatarAirborne | AvatarDowned;
     a.hp = 77; a.maxHp = 120; a.mp = 9; a.maxMp = 15;
+    a.castSeq = 7; a.castId = 0x1F; a.castCategory = 2; a.castFlags = 0x11; a.castForm = 3;
+    a.weaponItem = 0x29;
 
     const AvatarRelay sent {0x1234567800000001ULL, a};
     const auto pkt = encode(sent);
@@ -86,7 +88,7 @@ void testCodec() {
     AvatarRelay received;
     read(r, received);
     const auto& b = received.avatar;
-    check(size == 112 && pkt.size() == 115 && r.atEnd(), "v15 relay has exact 112-byte payload");
+    check(size == 114 && pkt.size() == 117 && r.atEnd(), "v16 relay has exact 114-byte payload");
     check(received.ownerConnectionId == sent.ownerConnectionId, "relay preserves full 64-bit connection identity");
     check(type == PacketType::AvatarRelay, "avatar relay packet type");
     check(b.seq == a.seq && b.serverTimeMs == a.serverTimeMs &&
@@ -101,6 +103,9 @@ void testCodec() {
     check(b.flags == a.flags && b.hp == 77 && b.maxHp == 120 && b.mp == 9 &&
               b.maxMp == 15,
           "avatar flags and stats round-trip");
+    check(b.castSeq == 7 && b.castId == 0x1F && b.castCategory == 2 && b.castFlags == 0x11 && b.castForm == 3,
+          "avatar cast fields round-trip");
+    check(b.weaponItem == 0x29, "avatar weapon item round-trips");
 
     const auto pong = encode(ClockPong {111, 222});
     decodePacketHeader(pong.data(), pong.size(), payload, size);
@@ -395,7 +400,7 @@ void testAvatarBridge() {
               got.pose.ownerSlot == SlotType::Friend2 && got.pose.position.x == 9.0f,
           "DLL reads puppet 1's pose");
     PuppetAuthority authority {PuppetAuthorityMode::Network, 0, 17, kRoster};
-    check(AVATAR_BRIDGE_VERSION == 5 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
+    check(AVATAR_BRIDGE_VERSION == 6 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
           "bridge v5 preserves full network provenance");
     check(!dll.TryReadPuppet(1, got), "cached puppet has no new shared-memory sample");
     authority.connectionIds[2] += 0x100000000ULL;

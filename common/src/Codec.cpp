@@ -688,6 +688,7 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU16(a.castCategory);
     w.writeU8(a.castFlags);
     w.writeU8(a.castForm);
+    w.writeU16(a.weaponItem);
 }
 
 void write(ByteWriter& w, const ClockPing& p) { w.writeU64(p.clientSendMs); }
@@ -1106,6 +1107,7 @@ void read(ByteReader& r, AvatarState& a) {
     a.castCategory = r.readU16();
     a.castFlags = r.readU8();
     a.castForm = r.readU8();
+    a.weaponItem = r.readU16();
 }
 
 void read(ByteReader& r, ClockPing& p) { p.clientSendMs = r.readU64(); }

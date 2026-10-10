@@ -1149,9 +1149,11 @@ static bool IsPuppetActive(int index) {
 
 // Owner-thread projection only: already captured avatar values, never extra native reads.
 // warp's transition observer: game thread, inside the requesting entity update.
+namespace clonewpn { static void Reset(); }
 static void PublishLocalForTransition() {
     ReleaseDownedSpectate(); // no spectator selection may survive even a same-room retry
     CloneGaugeClear(0); CloneGaugeClear(1); // the clone dies with the room; the HUD must not keep it
+    clonewpn::Reset(); // the next clone spawns with this machine's keyblade again
     if (!g_avatarBridge.IsOpen()) return;
     if (const auto flagged = g_localAvatar.OnTransition(g_frameCounter)) g_avatarBridge.PublishLocal(*flagged);
 }
@@ -1503,6 +1505,240 @@ static void Install(uintptr_t exeBase) {
     Log("[cast] replay ready: FcExecute hook at RVA 0x%llX", static_cast<unsigned long long>(RVA_FC_EXECUTE));
 }
 } // namespace clonecast
+
+// ============================================================================
+// Weapon sync: a clone carries the keyblade its owner has equipped
+// ============================================================================
+// Owner side: the equipped weapon's item id sits at +0 of the character's save record
+// (SAVE 0x9A98B0 + 0x24F0 + index*0x114, index from the objentry's character id as 0x3E60C0 maps
+// it). It goes out with every avatar sample (weaponItem). Clone side: the clone spawns with this
+// machine's keyblade. When the streamed item differs, the swap the equip menu performs for a
+// party member (task body 0x36AF80 -> 0x3D59C0, queued by 0x36B210) runs for the clone actor as a
+// game task on the same task list: release the old weapon object, request the new model's load,
+// wait for the loader (the task yields its fiber per frame), create the weapon entity bound to
+// the actor's motion. The game's task picks its actor by character id (the local player first),
+// so the body is replicated with the clone actor given directly; every helper is byte-matched.
+namespace clonewpn {
+static constexpr uintptr_t RVA_SAVE = 0x9A98B0, SAVE_CHAR_RECORDS = 0x24F0, CHAR_RECORD_SIZE = 0x114;
+static constexpr uintptr_t RVA_TASK_LIST_PTR = 0x716A38;   // *(0x151560() + 8): the field task list
+static constexpr uintptr_t RVA_TASK_CREATE = 0x14F8A0;     // (list, flags, priority, fn, stack, file, line) -> task
+static constexpr uintptr_t RVA_TASK_EXISTS = 0x14FC80;     // (list, fn) -> bool
+static constexpr uintptr_t RVA_GAME_SWAP_TASK = 0x36AF80;  // the equip menu's own swap task body
+static constexpr uintptr_t RVA_SWAP_PENDING = 0x36B3A0;    // equip queue busy or swap task alive
+static constexpr uintptr_t RVA_MENU_OPEN = 0x3A0A30;       // pause/menu state (the loader waits on it)
+static constexpr uintptr_t RVA_WEAPON_VISIBLE = 0x3BA840;  // (weapon) -> char
+static constexpr uintptr_t RVA_WEAPON_DESTROY = 0x3EFF20;  // (weapon)
+static constexpr uintptr_t RVA_OBJENTRY_BY_ID = 0x3DFEB0;  // (objId) -> objentry
+static constexpr uintptr_t RVA_PARTY_OBJID = 0x405190;     // (0) -> party slot 0 objentry id
+static constexpr uintptr_t RVA_MODEL_RELEASE = 0x39D010;   // (objId)
+static constexpr uintptr_t RVA_ITEM_TO_OBJID = 0x3EF8B0;   // (weaponClass, item) -> objId
+static constexpr uintptr_t RVA_MODEL_LOAD = 0x3E0A20;      // (weaponClass, slot, newObjId, oldObjId, extra)
+static constexpr uintptr_t RVA_LOAD_WAIT = 0x39D460;       // (task): pump the loader, yielding
+static constexpr uintptr_t RVA_MOTION_FLAG = 0x3AA4F0;     // (actor) -> char
+static constexpr uintptr_t RVA_ALLOC = 0x152430;           // (size) -> memory
+static constexpr uintptr_t RVA_WEAPON_CREATE = 0x3EF750;   // (mem, objentry, actor, class, slot, motionBase) -> weapon
+static constexpr uintptr_t RVA_MOTION_BIND_A = 0x3C8440;   // (weapon+0x158, actor+0x188)
+static constexpr uintptr_t RVA_MOTION_BIND_B = 0x3C86A0;   // (weapon+0x158, actor+0x180, 0, actor+0x19C)
+static constexpr uintptr_t RVA_POST_FLAG = 0x1515C0, RVA_POST_NOTIFY = 0x163510;
+static constexpr uintptr_t ACTOR_OBJENTRY = 0x8, ACTOR_FLAGS = 0x6C8, ACTOR_WEAPON_SLOTS = 0xD60;
+static constexpr uintptr_t OBJENTRY_CHAR_ID = 0x4C, OBJENTRY_WEAPON_CLASS = 0x4E, WEAPON_EXTRA_HANDLE = 0xBB0;
+
+struct Sig { uintptr_t rva; uint8_t bytes[8]; };
+static constexpr Sig kSigs[] = {
+    {RVA_TASK_CREATE,    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C}},
+    {RVA_TASK_EXISTS,    {0x33, 0xC0, 0x48, 0x85, 0xC0, 0x75, 0x06, 0x48}},
+    {RVA_GAME_SWAP_TASK, {0x44, 0x8B, 0x49, 0x28, 0x44, 0x8B, 0x41, 0x20}},
+    {RVA_SWAP_PENDING,   {0x48, 0x83, 0xEC, 0x28, 0xE8, 0xB7, 0x61, 0xDE}},
+    {RVA_MENU_OPEN,      {0x48, 0x83, 0x3D, 0xF0, 0xCB, 0x66, 0x02, 0x00}},
+    {RVA_WEAPON_VISIBLE, {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0xF7, 0x81}},
+    {RVA_WEAPON_DESTROY, {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B}},
+    {RVA_OBJENTRY_BY_ID, {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0xC1}},
+    {RVA_PARTY_OBJID,    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83}},
+    {RVA_MODEL_RELEASE,  {0x48, 0x89, 0x5C, 0x24, 0x10, 0x56, 0x48, 0x83}},
+    {RVA_ITEM_TO_OBJID,  {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x85, 0xC9}},
+    {RVA_MODEL_LOAD,     {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C}},
+    {RVA_LOAD_WAIT,      {0x40, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x89}},
+    {RVA_MOTION_FLAG,    {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B}},
+    {RVA_ALLOC,          {0x48, 0x8B, 0xD1, 0x45, 0x33, 0xC0, 0x48, 0x8B}},
+    {RVA_WEAPON_CREATE,  {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48}},
+    {RVA_MOTION_BIND_A,  {0x89, 0x51, 0x30, 0x85, 0xD2, 0x75, 0x0E, 0x48}},
+    {RVA_MOTION_BIND_B,  {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74}},
+    {RVA_POST_FLAG,      {0x80, 0x3D, 0xE9, 0xF0, 0x7A, 0x00, 0x00, 0x0F}},
+    {RVA_POST_NOTIFY,    {0xC6, 0x05, 0x01, 0x55, 0x5B, 0x00, 0x00, 0xC3}},
+};
+
+using PFN_TaskCreate = uintptr_t(__fastcall*)(uintptr_t list, uint32_t flags, int priority, void* fn, uint32_t stack, const char* file, int line);
+using PFN_TaskExists = uint8_t(__fastcall*)(uintptr_t list, void* fn);
+using PFN_Char0 = uint8_t(__fastcall*)();
+using PFN_CharP = uint8_t(__fastcall*)(uintptr_t);
+using PFN_VoidP = void(__fastcall*)(uintptr_t);
+using PFN_VoidI = void(__fastcall*)(int);
+using PFN_ObjentryById = uintptr_t(__fastcall*)(uint32_t objId);
+using PFN_PartyObjId = uint16_t(__fastcall*)(int);
+using PFN_ItemToObjId = uint32_t(__fastcall*)(int weaponClass, int item);
+using PFN_ModelLoad = void(__fastcall*)(int weaponClass, int slot, uint32_t newObjId, int oldObjId, int extra);
+using PFN_Alloc = uintptr_t(__fastcall*)(uint64_t size);
+using PFN_WeaponCreate = uintptr_t(__fastcall*)(uintptr_t mem, uintptr_t objentry, uintptr_t actor, int weaponClass, int slot, int motionBase);
+using PFN_BindA = void(__fastcall*)(uintptr_t motion, int);
+using PFN_BindB = void(__fastcall*)(uintptr_t motion, uint32_t, uint32_t, uint32_t);
+using PFN_TypeObjId = int(__fastcall*)(uintptr_t type, uintptr_t obj);
+using PFN_TypeShow = void(__fastcall*)(uintptr_t type, uintptr_t obj);
+
+static bool g_enabled = true;        // KH2COOP_WEAPON_SYNC=0 disables
+static bool g_ready = false;         // every signature matched
+static uintptr_t g_task = 0;         // our swap task while it runs (one at a time)
+static uintptr_t g_appliedActor[2] {}; // clone actor the item was last applied to
+static uint16_t g_appliedItem[2] {};
+static uint32_t g_retryAt[2] {};
+static unsigned g_logged = 0;
+struct Result { int puppet; uintptr_t actor; uint16_t item; uint32_t objId; int step; bool ok; }; // task -> frame loop
+static Result g_result {}; static bool g_resultPending = false;
+
+static int RecordIndex(uint32_t charId) { // 0x3E60C0 - 1
+    if (charId - 1u > 0xE) return -1;
+    if (charId == 0xE) return 0;
+    if (charId == 0xF) return 5;
+    return static_cast<int>(charId) - 1;
+}
+
+// Owner side: the local player's equipped weapon item (0 when unknown).
+static uint16_t LocalWeaponItem() {
+    if (!g_soraActor || !g_resolveHandle) return 0;
+    __try {
+        const auto objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(g_soraActor + ACTOR_OBJENTRY));
+        if (objentry < 0x10000) return 0;
+        const int index = RecordIndex(*reinterpret_cast<const uint16_t*>(objentry + OBJENTRY_CHAR_ID));
+        if (index < 0) return 0;
+        return *reinterpret_cast<const uint16_t*>(g_exeBase + RVA_SAVE + SAVE_CHAR_RECORDS + static_cast<uintptr_t>(index) * CHAR_RECORD_SIZE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+static void Stamp(AvatarState& a) { a.weaponItem = LocalWeaponItem(); }
+
+static uintptr_t TypeOf(uintptr_t obj) { return g_resolveHandle(*reinterpret_cast<const uint32_t*>(obj)); }
+template <typename F> static F VFn(uintptr_t type, uintptr_t slot) { return reinterpret_cast<F>(*reinterpret_cast<const uintptr_t*>(*reinterpret_cast<const uintptr_t*>(type) + slot)); }
+
+// The swap, replicated from 0x3D59C0 with the actor given. Runs inside the task's fiber on the
+// game thread; the load wait yields per frame. Returns the step reached (9 = done).
+static int Swap(uintptr_t task, uintptr_t actor, uint16_t item, uint32_t& newObjIdOut) {
+    const auto base = g_exeBase;
+    const int slot = 0;
+    auto* slotPtr = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS + static_cast<uintptr_t>(slot) * 8);
+    const uintptr_t old = *slotPtr;
+    if (old == 0) return 1;
+    const uintptr_t oldType = TypeOf(old);
+    if (oldType == 0) return 1;
+    const int oldObjId = VFn<PFN_TypeObjId>(oldType, 0x70)(oldType, old);
+    const uintptr_t extra = g_resolveHandle(*reinterpret_cast<const uint32_t*>(old + WEAPON_EXTRA_HANDLE));
+    const int extraId = extra ? *reinterpret_cast<const int16_t*>(extra) : -1;
+    const uint8_t visible = reinterpret_cast<PFN_CharP>(base + RVA_WEAPON_VISIBLE)(old);
+    uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
+    if (objentry == 0) return 2;
+    int weaponClass = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
+    const uint32_t newObjId = reinterpret_cast<PFN_ItemToObjId>(base + RVA_ITEM_TO_OBJID)(weaponClass, item);
+    newObjIdOut = newObjId;
+    if (newObjId == 0) return 3; // not a weapon of this class: nothing destroyed
+    reinterpret_cast<PFN_VoidP>(base + RVA_WEAPON_DESTROY)(old);
+    *slotPtr = 0;
+    if (weaponClass != 0x35 && (*reinterpret_cast<const uint8_t*>(actor + ACTOR_FLAGS + 3) & 1) && slot == 0) {
+        const uint16_t partyObjId = reinterpret_cast<PFN_PartyObjId>(base + RVA_PARTY_OBJID)(0);
+        const uintptr_t partyEntry = reinterpret_cast<PFN_ObjentryById>(base + RVA_OBJENTRY_BY_ID)(partyObjId);
+        if (partyEntry) weaponClass = *reinterpret_cast<const int16_t*>(partyEntry + OBJENTRY_WEAPON_CLASS);
+    }
+    reinterpret_cast<PFN_VoidI>(base + RVA_MODEL_RELEASE)(oldObjId);
+    reinterpret_cast<PFN_ModelLoad>(base + RVA_MODEL_LOAD)(weaponClass, slot, newObjId, oldObjId, extraId);
+    reinterpret_cast<PFN_VoidP>(base + RVA_LOAD_WAIT)(task); // yields until the loader is idle
+    // The clone may have left with the room while the loader ran.
+    bool alive = false;
+    for (int i = 0; i < 2; ++i) if (PuppetTarget(i) == actor && IsPuppetActive(i)) alive = true;
+    if (!alive) return 4;
+    const uintptr_t actorType = TypeOf(actor);
+    if (actorType == 0) return 4;
+    int motionBase;
+    if ((*reinterpret_cast<const uint32_t*>(actor + ACTOR_FLAGS) & 0x80) && reinterpret_cast<PFN_CharP>(base + RVA_MOTION_FLAG)(actor) && slot == 0) motionBase = 0x8FD;
+    else motionBase = slot + 1 + VFn<PFN_TypeObjId>(actorType, 0x70)(actorType, actor);
+    const uintptr_t mem = reinterpret_cast<PFN_Alloc>(base + RVA_ALLOC)(0xC10);
+    if (mem == 0) return 5;
+    objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
+    if (objentry == 0) return 5;
+    const int cls = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
+    const uintptr_t newEntry = reinterpret_cast<PFN_ObjentryById>(base + RVA_OBJENTRY_BY_ID)(newObjId);
+    const uintptr_t w = reinterpret_cast<PFN_WeaponCreate>(base + RVA_WEAPON_CREATE)(mem, newEntry, actor, cls, slot, motionBase);
+    *slotPtr = w;
+    if (w == 0) return 6;
+    reinterpret_cast<PFN_BindA>(base + RVA_MOTION_BIND_A)(w + 0x158, *reinterpret_cast<const int32_t*>(actor + 0x188));
+    reinterpret_cast<PFN_BindB>(base + RVA_MOTION_BIND_B)(w + 0x158, *reinterpret_cast<const uint32_t*>(actor + 0x180), 0, *reinterpret_cast<const uint32_t*>(actor + 0x19C));
+    if (visible == 0) { const uintptr_t wt = TypeOf(w); if (wt) VFn<PFN_TypeShow>(wt, 0x88)(wt, w); }
+    if (reinterpret_cast<PFN_Char0>(base + RVA_POST_FLAG)()) reinterpret_cast<void(__fastcall*)()>(base + RVA_POST_NOTIFY)();
+    return 9;
+}
+
+static void __fastcall TaskMain(uintptr_t task) {
+    Result r {};
+    r.puppet = *reinterpret_cast<const int32_t*>(task + 0x18);
+    r.actor = *reinterpret_cast<const uintptr_t*>(task + 0x20);
+    r.item = static_cast<uint16_t>(*reinterpret_cast<const uint32_t*>(task + 0x28));
+    __try { r.step = Swap(task, r.actor, r.item, r.objId); r.ok = r.step == 9; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { r.step = -1; r.ok = false; }
+    g_result = r; g_resultPending = true; g_task = 0;
+}
+
+// Game thread, each frame a Sora clone is driven. Queues the swap when the streamed item
+// differs from the one applied to this actor and the game is in a state its own swap would run in.
+static void Tick(int i, uintptr_t actor) {
+    if (!g_enabled || !g_ready || actor == 0 || i < 0 || i > 1) return;
+    if (g_resultPending) {
+        g_resultPending = false;
+        const Result& r = g_result;
+        if (r.puppet >= 0 && r.puppet < 2) {
+            if (r.ok || r.step == 3) { g_appliedActor[r.puppet] = r.actor; g_appliedItem[r.puppet] = r.item; }
+            else g_retryAt[r.puppet] = g_frameCounter + 600;
+        }
+        if (g_logged < 40) { ++g_logged; Log("[weapon] frame %u swap on clone %p (puppet %d): item 0x%X objId 0x%X step %d%s", g_frameCounter, reinterpret_cast<void*>(r.actor), r.puppet, r.item, r.objId, r.step, r.ok ? " ok" : r.step == 3 ? " (no weapon object for this class; kept)" : r.step == -1 ? " FAULTED" : " failed"); }
+    }
+    const uint16_t want = g_puppets[i].pose.pose.weaponItem;
+    if (want == 0 || (g_appliedActor[i] == actor && g_appliedItem[i] == want)) return;
+    if (g_frameCounter < g_retryAt[i]) return;
+    __try {
+        const auto base = g_exeBase;
+        const uintptr_t list = *reinterpret_cast<const uintptr_t*>(base + RVA_TASK_LIST_PTR);
+        if (list < 0x10000) return;
+        const auto exists = reinterpret_cast<PFN_TaskExists>(base + RVA_TASK_EXISTS);
+        if (g_task != 0) { if (exists(list, reinterpret_cast<void*>(&TaskMain))) return; g_task = 0; } // dropped with its list
+        if (*reinterpret_cast<const int32_t*>(base + offsets::CUTSCENE_STATE) != 0 || *reinterpret_cast<const uintptr_t*>(base + offsets::EVENT_CONTEXT) != 0) return;
+        if (warp::LoadPending() || warp::TransitionPending()) return;
+        if (reinterpret_cast<PFN_Char0>(base + RVA_MENU_OPEN)() || reinterpret_cast<PFN_Char0>(base + RVA_SWAP_PENDING)()) return;
+        if (*reinterpret_cast<const uintptr_t*>(actor + ACTOR_WEAPON_SLOTS) == 0) return; // no weapon to replace yet
+        if (exists(list, reinterpret_cast<void*>(base + RVA_GAME_SWAP_TASK)) || exists(list, reinterpret_cast<void*>(&TaskMain))) return;
+        const uintptr_t task = reinterpret_cast<PFN_TaskCreate>(base + RVA_TASK_CREATE)(list, 0, 140000, reinterpret_cast<void*>(&TaskMain), 0x1000, "d:\\hd28\\kingdom2\\common\\task.h", 0x8C);
+        if (task == 0) { g_retryAt[i] = g_frameCounter + 600; return; }
+        *reinterpret_cast<int32_t*>(task + 0x18) = i;
+        *reinterpret_cast<uintptr_t*>(task + 0x20) = actor;
+        *reinterpret_cast<uint32_t*>(task + 0x28) = want;
+        g_task = task;
+        g_retryAt[i] = g_frameCounter + 120; // the result arrives before this in practice
+        if (g_logged < 40) { ++g_logged; Log("[weapon] frame %u swap queued on clone %p (puppet %d): item 0x%X (had 0x%X) task %p", g_frameCounter, reinterpret_cast<void*>(actor), i, want, g_appliedActor[i] == actor ? g_appliedItem[i] : 0, reinterpret_cast<void*>(task)); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_retryAt[i] = g_frameCounter + 600;
+        if (g_logged < 40) { ++g_logged; Log("[weapon] queue faulted (puppet %d)", i); }
+    }
+}
+
+static void Reset() { g_appliedActor[0] = g_appliedActor[1] = 0; g_appliedItem[0] = g_appliedItem[1] = 0; g_retryAt[0] = g_retryAt[1] = 0; }
+
+static void Install(uintptr_t exeBase) {
+    char v[2] {};
+    g_enabled = !(GetEnvironmentVariableA("KH2COOP_WEAPON_SYNC", v, sizeof(v)) == 1 && v[0] == '0');
+    if (!g_enabled) { Log("[weapon] sync off (KH2COOP_WEAPON_SYNC=0); the owner's weapon is still streamed"); return; }
+    for (const Sig& s : kSigs) {
+        if (std::memcmp(reinterpret_cast<const void*>(exeBase + s.rva), s.bytes, sizeof(s.bytes)) != 0) {
+            Log("[weapon] bytes at RVA 0x%llX don't match; weapon sync off", static_cast<unsigned long long>(s.rva));
+            return;
+        }
+    }
+    g_ready = g_resolveHandle != nullptr;
+    Log("[weapon] sync ready (%s)", g_ready ? "all signatures matched" : "no handle resolver; off");
+}
+} // namespace clonewpn
 
 #include "DownedSpectate.inl"
 
@@ -2813,6 +3049,7 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     const auto actor = reinterpret_cast<uintptr_t>(actorObj);
     BindPuppetDrive(index, actor);
     CloneGaugeRegister(index, actor);
+    clonewpn::Tick(index, actor);
     PuppetDriver& d = g_puppets[index];
     const auto& pose = d.pose.pose;
     uint32_t motion = pose.motionId;
@@ -2901,6 +3138,7 @@ static void ApplyPuppetTransform(void* actorObj, int index) {
     if (!IsPuppetActive(index) || PuppetTarget(index) != reinterpret_cast<uintptr_t>(actorObj)) return;
     BindPuppetDrive(index, reinterpret_cast<uintptr_t>(actorObj));
     CloneGaugeRegister(index, reinterpret_cast<uintptr_t>(actorObj)); // Sora clones drive from here
+    clonewpn::Tick(index, reinterpret_cast<uintptr_t>(actorObj));
     const auto& pose = g_puppets[index].pose.pose;
     const auto actor = reinterpret_cast<uintptr_t>(actorObj);
     const uintptr_t entity = actor + offsets::actor::ENTITY_TRANSFORM;
@@ -3492,6 +3730,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
                                                inEvent, false);
             avatar.seq = g_frameCounter;
             clonecast::Stamp(avatar);
+            clonewpn::Stamp(avatar);
             // VUH-1513: only with a kit requested does the roster byte report the
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit
@@ -3906,6 +4145,7 @@ bool Initialize(uintptr_t exeBase) {
                 : "[privatestatus] initialization refused; profile unqualified");
     cloneneutral::Install(exeBase); // VUH-1489: default off (KH2COOP_CLONE_NEUTRAL_INPUT)
     clonecast::Install(exeBase);    // cast replay on clones (needs the neutral-input window; KH2COOP_CAST_REPLAY=0 off)
+    clonewpn::Install(exeBase);     // clones carry their owner's keyblade (KH2COOP_WEAPON_SYNC=0 off)
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the
