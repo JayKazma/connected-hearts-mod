@@ -1404,17 +1404,43 @@ struct Local { uint16_t seq = 0, id = 0, category = 0; uint8_t flags = 0, form =
 static Local g_local; // owner thread only
 static unsigned g_logged = 0;
 
+// The command table (0x3B68B0: bsearch over [*0x2A161E8 + 8], 0x30-byte rows sorted by id; +2 = kind).
+// Kinds seen in 0x3D6FC0/0x3A8B10: 1 attack, 2 magic (redirects to the leveled spell), 3 item/cast
+// (motion 9), 0x1E/0x1F/0x20/0x37/0x7F field interactions that dereference the FC target (null on a
+// clone: command 55 kind 0x37 crashed the receiver, 2026-10-09). Only magic and items are replayed.
+static constexpr uintptr_t RVA_COMMAND_TABLE_PTR = 0x2A161E8;
+static int CommandKind(uint16_t id) {
+    __try {
+        const auto table = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_COMMAND_TABLE_PTR);
+        if (table < 0x10000) return -1;
+        const auto count = *reinterpret_cast<const int32_t*>(table + 4);
+        if (count <= 0 || count > 4096) return -1;
+        const uint8_t* rows = reinterpret_cast<const uint8_t*>(table + 8);
+        int lo = 0, hi = count - 1;
+        while (lo <= hi) {
+            const int mid = (lo + hi) / 2;
+            const auto key = *reinterpret_cast<const uint16_t*>(rows + static_cast<size_t>(mid) * 0x30);
+            if (key == id) return *reinterpret_cast<const int16_t*>(rows + static_cast<size_t>(mid) * 0x30 + 2);
+            if (key < id) lo = mid + 1; else hi = mid - 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return -1;
+}
+static bool ReplayableKind(int kind) { return kind == 2 || kind == 3; }
+
 static uintptr_t __fastcall HookedFcExecute(void* actor, const uint16_t* record) {
     const auto result = g_origFcExecute(actor, record);
     if (result == 0 || reinterpret_cast<uintptr_t>(actor) != g_soraActor) return result;
     __try {
         const uint16_t id = record[0];
         if (id == 0) return result;
+        const int kind = CommandKind(id);
+        if (g_logged < 20) { ++g_logged; Log("[cast] frame %u local command id=%u kind=%d record1=%u flags=%02X form=%u%s", g_frameCounter, id, kind, record[1], reinterpret_cast<const uint8_t*>(record)[4], reinterpret_cast<const uint8_t*>(record)[5], ReplayableKind(kind) ? "" : " (not replayed)"); }
+        if (!ReplayableKind(kind)) return result;
         g_local.id = id; g_local.category = record[1];
         g_local.flags = reinterpret_cast<const uint8_t*>(record)[4];
         g_local.form = reinterpret_cast<const uint8_t*>(record)[5];
         ++g_local.seq; if (g_local.seq == 0) g_local.seq = 1;
-        if (g_logged < 20) { ++g_logged; Log("[cast] frame %u local command id=%u category=%u flags=%02X form=%u seq=%u", g_frameCounter, id, g_local.category, g_local.flags, g_local.form, g_local.seq); }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return result;
 }
@@ -1441,6 +1467,8 @@ static bool Take(uintptr_t actor, uint16_t& id, uint16_t& category, uint8_t& fla
         PuppetDriver& d = g_puppets[i];
         if (!d.castPending || d.actor != actor || !IsPuppetActive(i)) continue;
         d.castPending = false;
+        const int kind = CommandKind(d.castId);
+        if (!ReplayableKind(kind)) { if (g_logged < 40) { ++g_logged; Log("[cast] skip id=%u kind=%d on clone (puppet %d)", d.castId, kind, i); } return false; }
         id = d.castId; category = d.castCategory; flags = d.castFlags; form = d.castForm;
         d.nativeCastUntil = g_frameCounter + 120;
         if (g_logged < 40) { ++g_logged; Log("[cast] frame %u replay on clone %p (puppet %d): id=%u category=%u flags=%02X form=%u", g_frameCounter, reinterpret_cast<void*>(actor), i, id, category, flags, form); }
