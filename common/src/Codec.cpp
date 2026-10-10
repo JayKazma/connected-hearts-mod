@@ -689,6 +689,15 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU8(a.castFlags);
     w.writeU8(a.castForm);
     w.writeU16(a.weaponItem);
+    w.writeU16(a.eventSeq);
+    w.writeU8(a.eventWorld);
+    w.writeU8(a.eventRoom);
+    w.writeU16(a.eventDoor);
+    w.writeU16(a.eventMap);
+    w.writeU16(a.eventBtl);
+    w.writeU16(a.eventEvt);
+    w.writeU16(a.skipSeq);
+    w.writeU8(a.eventActive);
 }
 
 void write(ByteWriter& w, const ClockPing& p) { w.writeU64(p.clientSendMs); }
@@ -1108,6 +1117,15 @@ void read(ByteReader& r, AvatarState& a) {
     a.castFlags = r.readU8();
     a.castForm = r.readU8();
     a.weaponItem = r.readU16();
+    a.eventSeq = r.readU16();
+    a.eventWorld = r.readU8();
+    a.eventRoom = r.readU8();
+    a.eventDoor = r.readU16();
+    a.eventMap = r.readU16();
+    a.eventBtl = r.readU16();
+    a.eventEvt = r.readU16();
+    a.skipSeq = r.readU16();
+    a.eventActive = r.readU8();
 }
 
 void read(ByteReader& r, ClockPing& p) { p.clientSendMs = r.readU64(); }

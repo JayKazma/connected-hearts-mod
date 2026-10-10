@@ -87,6 +87,10 @@ void (*g_transitionObserver)() = nullptr;
 std::uint32_t g_transitionSerial = 0;
 std::uint32_t g_loadSerial = 0;
 std::uint32_t g_blockedNativeExits = 0;
+// Cutscene sync: a followed event's load serial and the deadline for letting its closing jump through.
+std::uint32_t g_eventFollowLoad = UINT32_MAX;
+ULONGLONG g_eventExitUntilMs = 0;
+RoomTransition g_eventFollowTarget {};
 RoomTransition g_hostTarget {};
 bool g_hostQueued = false;
 bool g_hostIssued = false;
@@ -210,6 +214,14 @@ void BeginTransition() {
 
 void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t fade,
                                         int mode, std::uint8_t flag, int extra) {
+    if (enemysync::HasClientAuthority() && g_eventExitUntilMs != 0 && GetTickCount64() < g_eventExitUntilMs) {
+        g_eventExitUntilMs = 0; // one scripted exit per followed event: the same jump the host's event made
+        if (g_log) g_log("[warp] client native exit allowed (followed event) target=%02X/%02X door=%u map=%u btl=%u evt=%u",
+                         to->world, to->room, to->door, to->map, to->battle, to->event);
+        BeginTransition();
+        g_requestTransition(to, fade, mode, flag, extra);
+        return;
+    }
     if (enemysync::HasClientAuthority()) {
         ++g_blockedNativeExits;
         if (g_log) g_log("[warp] client native exit blocked count=%u target=%02X/%02X door=%u map=%u btl=%u evt=%u",
@@ -252,6 +264,24 @@ void IssueHostTransition() {
     // Room initialization reads programs and chest flags from SAVE. Wait for
     // the complete host snapshot and apply it before starting the native load.
     if (!progresssync::ApplyAtRoomBoundary(g_hostGeneration)) return;
+    // Cutscene sync: this game already loaded the host's event room to play the event with it. The
+    // host announces that room once its event ends; a reload would replay the event here.
+    if (g_eventFollowLoad != UINT32_MAX && g_loadSerial == g_eventFollowLoad + 1) {
+        const auto here = ReadLocation();
+        if (here.worldId == g_hostTarget.worldId && here.roomId == g_hostTarget.roomId && here.door == g_hostTarget.door &&
+            here.mapProgram == g_hostTarget.mapProgram && here.battleProgram == g_hostTarget.battleProgram &&
+            here.eventProgram == g_hostTarget.eventProgram) {
+            g_hostQueued = false;
+            g_hostIssued = true;
+            g_hostIssueLoad = g_loadSerial - 1;
+            g_hostCause.issued = true;
+            g_hostCause.loadBefore = g_hostIssueLoad;
+            g_hostCause.issueTransition = g_transitionSerial;
+            g_eventFollowLoad = UINT32_MAX;
+            if (g_log) g_log("[warp] client already in the host's room (followed its event); epoch=%u arrives without a reload", g_hostTarget.epoch);
+            return;
+        }
+    }
     LocationPacket packet {};
     packet.world = static_cast<std::uint8_t>(g_hostTarget.worldId);
     packet.room = static_cast<std::uint8_t>(g_hostTarget.roomId);
@@ -445,6 +475,41 @@ bool QueueHostTransition(const RoomTransition& target, const ProducerWorldContex
                      target.epoch, target.worldId, target.roomId, target.door,
                      target.mapProgram, target.battleProgram, target.eventProgram);
     return true;
+}
+
+bool SafeGameplayForEventFollow() {
+    return g_ready && g_channel && !g_transitionPending && SafeToWarp();
+}
+
+bool IssueEventFollow(std::uint8_t world, std::uint8_t room, std::uint16_t door, std::uint16_t map,
+                      std::uint16_t battle, std::uint16_t event) {
+    if (!g_ready || !g_clientAuthority || !g_channel || g_transitionPending || !SafeToWarp()) return false;
+    RoomTransition location {};
+    location.worldId = world; location.roomId = room; location.door = door;
+    location.mapProgram = map; location.battleProgram = battle; location.eventProgram = event;
+    if (location.worldId >= 0xFF || location.roomId >= 0xFF || location.door > 0xFF) return false;
+    LocationPacket packet {};
+    packet.world = static_cast<std::uint8_t>(location.worldId);
+    packet.room = static_cast<std::uint8_t>(location.roomId);
+    packet.door = location.door;
+    packet.map = location.mapProgram;
+    packet.battle = location.battleProgram;
+    packet.event = location.eventProgram;
+    g_eventFollowTarget = location;
+    g_eventFollowLoad = g_loadSerial;
+    g_eventExitUntilMs = GetTickCount64() + 10 * 60 * 1000;
+    BeginTransition();
+    g_requestTransition(&packet, 1, 0, 0, 0);
+    if (g_log) g_log("[warp] client follows the host's event: %02X/%02X door=%u map=%u btl=%u evt=%u transition=%u",
+                     location.worldId, location.roomId, location.door, location.mapProgram,
+                     location.battleProgram, location.eventProgram, g_transitionSerial);
+    return true;
+}
+
+void EndEventFollow(unsigned graceMs) {
+    if (g_eventExitUntilMs == 0) return;
+    const ULONGLONG until = GetTickCount64() + graceMs;
+    if (until < g_eventExitUntilMs) g_eventExitUntilMs = until;
 }
 
 RoomTransition ReadLocation() {

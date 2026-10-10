@@ -181,6 +181,19 @@ struct AvatarState {
     // v16: the item id of the weapon the owner has equipped (character record +0; Kingdom Key 0x29).
     // A clone equips the same keyblade through the game's own swap task (clonewpn). 0 = unknown.
     std::uint16_t weaponItem {0};
+    // v17: cutscene sync. eventSeq changes each time the owner's game starts an event right after a
+    // room load (the room-entry cutscenes); eventWorld..eventEvt is the location it loaded, so the
+    // other game can load the same event. eventActive: an event is playing now. skipSeq changes each
+    // time the owner skips a cutscene.
+    std::uint16_t eventSeq {0};
+    std::uint8_t eventWorld {0};
+    std::uint8_t eventRoom {0};
+    std::uint16_t eventDoor {0};
+    std::uint16_t eventMap {0};
+    std::uint16_t eventBtl {0};
+    std::uint16_t eventEvt {0};
+    std::uint16_t skipSeq {0};
+    std::uint8_t eventActive {0};
 };
 
 struct InputButtons {

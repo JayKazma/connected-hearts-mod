@@ -50,6 +50,15 @@ void SetTransitionObserver(void (*observer)());
 std::uint32_t TransitionSerial();
 std::uint32_t LoadSerial();
 RoomTransition ReadLocation();
+// Cutscene sync, client only: load the room the host just loaded with its event program, so this
+// game plays the same event. The event's own closing jump is then let through once, and a host
+// announcement of the room this game already followed into counts as arrived without a reload.
+// Returns false (nothing issued) unless the game is in safe gameplay with no load pending.
+bool IssueEventFollow(std::uint8_t world, std::uint8_t room, std::uint16_t door, std::uint16_t map,
+                      std::uint16_t battle, std::uint16_t event);
+bool SafeGameplayForEventFollow();
+// The followed event ended: its closing jump, if any, comes within graceMs; after that, exits are blocked again.
+void EndEventFollow(unsigned graceMs);
 // VUH-1515 spawn picks: while the client executes the load the host issued (between its issue and
 // CompleteLoad) and the native location equals that target, the host's epoch for it; else 0.
 std::uint32_t HostIssuedLoadEpoch(const RoomTransition& loading);

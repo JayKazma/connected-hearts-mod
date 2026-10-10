@@ -45,7 +45,7 @@ static_assert(std::is_trivially_copyable_v<AvatarState>,
 
 static constexpr const char* AVATAR_BRIDGE_PREFIX = "Local\\kh2coop_avatar_";
 static constexpr std::uint32_t AVATAR_BRIDGE_MAGIC = 0x42564B32; // "2KVB"
-static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 6; // v6: AvatarState carries the owner's equipped weapon item (v5: executed field command)
+static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 7; // v7: PuppetPose carries the owner's newest unfiltered state (cutscene sync); v6 weapon item, v5 field command
 static constexpr int AVATAR_BRIDGE_PUPPETS = 2; // friend slots 1 and 2
 
 // A pose the DLL should apply to a friend-slot puppet.
@@ -54,6 +54,12 @@ struct PuppetPose {
     std::uint8_t _pad[7] {};
     PuppetProvenance provenance {};
     AvatarState pose {};          // pose.ownerSlot = which player this is
+    // v7: the owner's newest received state, published whether or not the puppet is shown (other
+    // room, cutscene, load), for cutscene sync. peerValid = 0 when nothing fresh was received.
+    std::uint8_t peerValid {0};
+    std::uint8_t _pad2[3] {};
+    std::uint32_t peerAgeMs {0};
+    AvatarState peer {};
 };
 
 static_assert(std::is_trivially_copyable_v<PuppetPose>);

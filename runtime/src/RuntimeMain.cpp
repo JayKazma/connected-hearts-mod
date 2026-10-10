@@ -1876,6 +1876,14 @@ int main(int argc, char* argv[]) {
             pose.provenance.ownerConnectionId = targets[i].ownerConnectionId;
             pose.provenance.localConnectionId = worldConnectionIds[worldSessionSlot];
             pose.provenance.hostConnectionId = worldConnectionIds[0];
+            {   // newest unfiltered state of this puppet's owner (cutscene sync)
+                std::lock_guard<std::mutex> lock(replicaMtx);
+                const auto owners = avatarSync.puppetOwners();
+                if (const auto* p = avatarSync.newestFor(owners[i])) {
+                    const std::uint64_t age = serverNowMs > p->serverTimeMs ? serverNowMs - p->serverTimeMs : 0;
+                    if (age < 5000) { pose.peerValid = 1; pose.peerAgeMs = static_cast<std::uint32_t>(age); pose.peer = *p; }
+                }
+            }
             avatarBridge.PublishPuppet(i, pose);
             if (avatarLatencyTraceBudget && targets[i].active) {
                 ++avatarActiveSamples[i];

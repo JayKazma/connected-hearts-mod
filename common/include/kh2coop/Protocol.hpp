@@ -8,13 +8,14 @@
 
 namespace kh2coop {
 
-inline constexpr std::uint16_t PROTOCOL_VERSION = 16;
+inline constexpr std::uint16_t PROTOCOL_VERSION = 17;
 
 // ===========================================================================
 // Protocol v14 adds RemoteHit (45) and TargetAuthority (46) (VUH-1515, enemy targeting of remote players)
 // and PartyIntent = 47 (VUH-1786, host intended party for a target room).
 // Protocol v15 adds the owner's executed field command to AvatarState (castSeq/castId/castCategory/castFlags/castForm), replayed on its clone.
 // Protocol v16 adds the owner's equipped weapon item (weaponItem) to AvatarState; its clone equips the same keyblade.
+// Protocol v17 adds the cutscene-sync fields (event location, event and skip sequence) to AvatarState.
 // v13 added EnemyMotion (VUH-1515 step 2, periodic host enemy pose/motion).
 // v12 added versioned host party layout and reapplication events.
 // v11 added streamed downed epoch/episode/delivery and ReviveRequest.

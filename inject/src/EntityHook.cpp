@@ -2278,6 +2278,189 @@ static void Install(uintptr_t exeBase) {
 }
 } // namespace clonefc
 
+// Cutscene sync: both players watch an event together; either one skipping skips it for both.
+//  - Each game streams whether an event is playing, and (eventSeq + location) when an event starts
+//    right after a room load: the room-entry cutscenes, which are loads with an event program.
+//  - The client, on a new host eventSeq, loads that location itself (warp::IssueEventFollow), so its
+//    game plays the same event from its own (host-synced) story flags.
+//  - Skip: the pause menu's Skip (0x31DD70 case 5/0x13) sets the timeline skip flag 0xB64F9C via
+//    0x2CFCD0. A local rise of the flag is streamed as skipSeq; a peer's skipSeq runs the same skip
+//    sequence here (flag, BGM fade 0x155750, voice stop 0x1DCC90, event flag 0x3AC340).
+//  - Barrier: a player whose shared event ended while the other is still in it gets neutral input
+//    until the other is out (3 min cap).
+// KH2COOP_CUTSCENE_SYNC=0 disables all of it.
+namespace cutscenesync {
+static constexpr uintptr_t RVA_SKIP_FLAG = 0xB64F9C;      // u8, set by 0x2CFCD0
+static constexpr uintptr_t RVA_SKIP_SET = 0x2CFCD0, RVA_SKIP_BGM = 0x155750, RVA_SKIP_VOICE = 0x1DCC90, RVA_SKIP_EVENT = 0x3AC340;
+struct Sig { uintptr_t rva; uint8_t bytes[10]; };
+static constexpr Sig kSigs[] = {
+    {RVA_SKIP_SET,   {0xC6, 0x05, 0xC5, 0x52, 0x89, 0x00, 0x01, 0xE9, 0x64, 0x59}},
+    {RVA_SKIP_BGM,   {0x48, 0x83, 0xEC, 0x28, 0x8B, 0x0D, 0x82, 0x1F, 0x5C, 0x00}},
+    {RVA_SKIP_VOICE, {0x48, 0x83, 0xEC, 0x28, 0x45, 0x33, 0xC0, 0x41, 0x8D, 0x50}},
+    {RVA_SKIP_EVENT, {0x48, 0x8B, 0x05, 0x31, 0x51, 0x66, 0x02, 0x83, 0x08, 0x10}},
+};
+static bool g_enabled = false;
+template <typename T> static T Read(uintptr_t rva) { T v {}; std::memcpy(&v, reinterpret_cast<const void*>(g_exeBase + rva), sizeof(T)); return v; }
+
+// local
+static bool g_active = false;          // an event is playing here
+static uint16_t g_eventSeq = 0, g_skipSeq = 0;
+struct EventLoc { uint8_t world, room; uint16_t door, map, btl, evt; };
+static EventLoc g_eventLoc {};
+static EventLoc ReadLoc() {
+    return {Read<uint8_t>(offsets::WORLD_ID), Read<uint8_t>(offsets::ROOM_ID), Read<uint8_t>(offsets::NOW + 2),
+            Read<uint16_t>(offsets::MAP_PROGRAM), Read<uint16_t>(offsets::BATTLE_PROGRAM), Read<uint16_t>(offsets::EVENT_PROGRAM)};
+}
+static uint8_t g_lastSkipFlag = 0;
+static uint32_t g_lastLoadSerial = 0;
+static ULONGLONG g_lastLoadMs = 0, g_eventEndMs = 0;
+static bool g_lastEventShared = false;  // the event that just ended was one the peer watched too
+static bool g_applyingRemoteSkip = false;
+static uint8_t g_endWorld = 0xFF, g_endRoom = 0xFF;
+
+// peer (puppet 0's owner; two players)
+static bool g_peerSeen = false, g_peerValid = false;
+static AvatarState g_peer {};
+static ULONGLONG g_peerNoteMs = 0;
+static uint16_t g_followedSeq = 0, g_seenSkipSeq = 0;
+static ULONGLONG g_followDeadline = 0, g_pendingSkipUntil = 0;
+static bool g_holding = false;
+static ULONGLONG g_holdSinceMs = 0;
+
+static int State() { return Read<int32_t>(offsets::CUTSCENE_STATE); }
+static uintptr_t Context() { return Read<uintptr_t>(offsets::EVENT_CONTEXT); }
+static bool PeerFresh() { return g_peerValid && GetTickCount64() - g_peerNoteMs < 3000; }
+
+// Game thread, once per frame (entity list head).
+static void Observe() {
+    __try {
+        const ULONGLONG now = GetTickCount64();
+        const uint32_t load = warp::LoadSerial();
+        if (load != g_lastLoadSerial) { g_lastLoadSerial = load; g_lastLoadMs = now; }
+        const int state = State();
+        const uintptr_t ctx = Context();
+        const bool active = (state >= 2 && state <= 4) || ctx != 0;
+        if (active && !g_active) {
+            const EventLoc loc = ReadLoc();
+            const bool afterLoad = now - g_lastLoadMs < 3000 && loc.evt != 0;
+            if (afterLoad) { ++g_eventSeq; g_eventLoc = loc; }
+            g_lastEventShared = PeerFresh() && (g_peer.eventActive || afterLoad);
+            Log("[cutscene] event started (state %d, context %p) at %02X/%02X evt %u%s; seq %u", state, reinterpret_cast<void*>(ctx),
+                loc.world, loc.room, loc.evt, afterLoad ? " after a room load" : "", g_eventSeq);
+        } else if (!active && g_active) {
+            g_eventEndMs = now;
+            g_endWorld = Read<uint8_t>(offsets::WORLD_ID); g_endRoom = Read<uint8_t>(offsets::ROOM_ID);
+            if (!g_lastEventShared) g_lastEventShared = PeerFresh() && g_peer.eventActive;
+            warp::EndEventFollow(4000);
+            Log("[cutscene] event ended%s", g_lastEventShared ? " (shared with the other player)" : "");
+        }
+        g_active = active;
+        const uint8_t skip = Read<uint8_t>(RVA_SKIP_FLAG);
+        if (skip == 1 && g_lastSkipFlag != 1 && active && !g_applyingRemoteSkip) {
+            ++g_skipSeq;
+            Log("[cutscene] skipped here; telling the other player (skip %u)", g_skipSeq);
+        }
+        g_lastSkipFlag = skip;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void Stamp(AvatarState& a) {
+    if (!g_enabled) return;
+    a.eventSeq = g_eventSeq;
+    a.eventWorld = g_eventLoc.world; a.eventRoom = g_eventLoc.room;
+    a.eventDoor = g_eventLoc.door; a.eventMap = g_eventLoc.map; a.eventBtl = g_eventLoc.btl; a.eventEvt = g_eventLoc.evt;
+    a.skipSeq = g_skipSeq;
+    a.eventActive = g_active ? 1 : 0;
+}
+
+static void NotePeer(int i, const PuppetPose& p) {
+    if (!g_enabled || i != 0) return;
+    if (!p.peerValid) { g_peerValid = false; return; }
+    g_peer = p.peer;
+    g_peerValid = true;
+    g_peerNoteMs = GetTickCount64();
+    if (!g_peerSeen) { // a session joined mid-way: nothing to follow or skip from before
+        g_peerSeen = true;
+        g_followedSeq = g_peer.eventSeq;
+        g_seenSkipSeq = g_peer.skipSeq;
+    }
+}
+
+static bool ApplySkip() {
+    __try {
+        if (State() != 3 || Context() == 0 || Read<uint8_t>(RVA_SKIP_FLAG) != 0 || Read<uint8_t>(offsets::OPEN_MENU) != 0xFF) return false;
+        g_applyingRemoteSkip = true;
+        reinterpret_cast<void(__fastcall*)()>(g_exeBase + RVA_SKIP_SET)();
+        reinterpret_cast<void(__fastcall*)()>(g_exeBase + RVA_SKIP_BGM)();
+        reinterpret_cast<void(__fastcall*)()>(g_exeBase + RVA_SKIP_VOICE)();
+        reinterpret_cast<void(__fastcall*)()>(g_exeBase + RVA_SKIP_EVENT)();
+        g_lastSkipFlag = 1;
+        g_applyingRemoteSkip = false;
+        Log("[cutscene] the other player skipped; skipped here too");
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_applyingRemoteSkip = false; Log("[cutscene] remote skip faulted"); return false; }
+}
+
+// Game thread, once per frame, after Observe.
+static void OnFrame() {
+    if (!g_enabled) return;
+    Observe();
+    const ULONGLONG now = GetTickCount64();
+    if (g_peerSeen && PeerFresh()) {
+        // skip
+        if (g_peer.skipSeq != g_seenSkipSeq) {
+            g_seenSkipSeq = g_peer.skipSeq;
+            if (!ApplySkip()) g_pendingSkipUntil = now + 8000; // our copy may still be loading
+        } else if (g_pendingSkipUntil && now < g_pendingSkipUntil) {
+            if (ApplySkip()) g_pendingSkipUntil = 0;
+        } else g_pendingSkipUntil = 0;
+        // follow (client only, the host's room-entry events)
+        if (g_peer.eventSeq != g_followedSeq && enemysync::HasClientAuthority()) {
+            if (!g_followDeadline) g_followDeadline = now + 5000;
+            if (!g_peer.eventActive || now > g_followDeadline) {
+                Log("[cutscene] host event %u not followed (%s)", g_peer.eventSeq, g_peer.eventActive ? "this game was not free to load it within 5 s" : "it already ended");
+                g_followedSeq = g_peer.eventSeq; g_followDeadline = 0;
+            } else if (!g_active && warp::IssueEventFollow(g_peer.eventWorld, g_peer.eventRoom, g_peer.eventDoor,
+                                                           g_peer.eventMap, g_peer.eventBtl, g_peer.eventEvt)) {
+                g_followedSeq = g_peer.eventSeq; g_followDeadline = 0;
+            }
+        } else if (g_peer.eventSeq == g_followedSeq) g_followDeadline = 0;
+    }
+    // barrier
+    const bool peerStill = PeerFresh() && g_peer.eventActive;
+    const bool hold = !g_active && g_lastEventShared && g_eventEndMs && now - g_eventEndMs < 180000 && peerStill;
+    if (hold != g_holding) {
+        g_holding = hold;
+        if (hold) { g_holdSinceMs = now; Log("[cutscene] waiting for the other player to finish the event"); }
+        else { Log("[cutscene] both players are out of the event (waited %llu ms)", static_cast<unsigned long long>(now - g_holdSinceMs)); g_lastEventShared = false; }
+    }
+    if (!hold && g_eventEndMs && now - g_eventEndMs >= 180000) g_lastEventShared = false;
+}
+
+// Input collector, after the original: neutral input while waiting.
+static void Input(void* inputStruct) {
+    if (!g_enabled || !g_holding) return;
+    __try {
+        if (*reinterpret_cast<uintptr_t*>(g_exeBase + offsets::INPUT_STRUCT_PTR) != reinterpret_cast<uintptr_t>(inputStruct)) return;
+        auto* raw = reinterpret_cast<uint8_t*>(inputStruct) + offsets::input::RAW_SLOT0;
+        *reinterpret_cast<uint16_t*>(raw + offsets::input::BUTTONS) = 0;
+        raw[offsets::input::LSTICK_X] = raw[offsets::input::LSTICK_Y] = 128;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void Install(uintptr_t exeBase) {
+    char v[2] {};
+    if (GetEnvironmentVariableA("KH2COOP_CUTSCENE_SYNC", v, sizeof(v)) == 1 && v[0] == '0') { Log("[cutscene] sync off (KH2COOP_CUTSCENE_SYNC=0)"); return; }
+    for (const Sig& s : kSigs)
+        if (std::memcmp(reinterpret_cast<const void*>(exeBase + s.rva), s.bytes, sizeof(s.bytes)) != 0) {
+            Log("[cutscene] bytes at RVA 0x%llX don't match; sync off", static_cast<unsigned long long>(s.rva));
+            return;
+        }
+    g_enabled = true;
+    Log("[cutscene] sync ready: follow the host's room-entry events, either player's skip skips both, wait for each other at the end");
+}
+} // namespace cutscenesync
+
 #include "DownedSpectate.inl"
 
 #include "CloneNeutralInput.inl"
@@ -2594,6 +2777,7 @@ static void PollPuppetPoses() {
         }
         kh2coop::PuppetPose pose;
         if (g_avatarBridge.TryReadPuppet(i, pose)) {
+            cutscenesync::NotePeer(i, pose);
             if (!suspended && pose.active && ValidPuppetProvenance(pose.provenance,
                     static_cast<std::uint8_t>(pose.pose.ownerSlot), i, enemysync::CapturePuppetAuthority())) {
                 driver.pose = pose;
@@ -3990,6 +4174,7 @@ static void __fastcall HookedInputCollector(void* inputStruct) {
             // VUH-1504 revive prompt: raw slot-0 buttons after the mailbox/event-hold apply.
             downedspike::PromptInput(inputStruct);
             downedspectate::Input(inputStruct);
+            cutscenesync::Input(inputStruct);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             if (control) eventholdnative::AbortInput();
             Log("EXCEPTION in HookedInputCollector post-call");
@@ -4170,6 +4355,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
                 // Hand pending room warps to the game on its own thread.
                 enemysync::OnFrameStart(g_frameCounter);
                 warp::OnFrameStart(g_frameCounter, addr);
+                cutscenesync::OnFrame();
                 BeginCloneFrame();
                 PollPuppetPoses();
                 downedspectate::Tick();
@@ -4283,6 +4469,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             avatar.seq = g_frameCounter;
             clonecast::Stamp(avatar);
             clonewpn::Stamp(avatar);
+            cutscenesync::Stamp(avatar);
             // VUH-1513: only with a kit requested does the roster byte report the
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit
@@ -4700,6 +4887,7 @@ bool Initialize(uintptr_t exeBase) {
     clonewpn::Install(exeBase);     // clones carry their owner's keyblade (KH2COOP_WEAPON_SYNC=0 off)
     cmdlookup::Install(exeBase);    // command table misses answered, not dereferenced
     clonefc::Install(exeBase);      // one command-menu tick per frame, the local player's
+    cutscenesync::Install(exeBase); // cutscenes watched together, skips shared (KH2COOP_CUTSCENE_SYNC=0 off)
     menuparty::Install(exeBase);    // the other player's Sora is not editable from the pause menu
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
