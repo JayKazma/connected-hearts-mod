@@ -2799,14 +2799,19 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     // Fire cast) on a clone crashed the game (VUH-1489, 2026-10-02), so it's
     // held at idle until the spell path is understood. Attack 151 and the
     // basic motions play fine.
-    if (motion == PUPPET_CLONE_UNSAFE_MOTION && IsPlayerClassActor(actor)) {
-        if (g_frameCounter < d.nativeCastUntil) {
-            // The clone is running the replayed command itself (clonecast): its own path set the
-            // cast motion with the state the raw SetAnimation lacked. Leave the clip alone.
+    if (d.nativeCastUntil != 0 && IsPlayerClassActor(actor)) {
+        // The clone is running a replayed command itself (clonecast): its own command path owns the
+        // motion (Fire is 56, items 9...) until the owner's stream is back on a locomotion clip or
+        // the window times out. Touching the clip here restarted the cast every frame.
+        const bool loco = motion == ANIM_IDLE || motion == ANIM_WALK || motion == ANIM_RUN;
+        if (g_frameCounter < d.nativeCastUntil && !loco) {
             d.lastAnim = static_cast<int>(motion);
             d.pendingMotion = -1; d.pendingFrames = 0;
             return;
         }
+        d.nativeCastUntil = 0;
+    }
+    if (motion == PUPPET_CLONE_UNSAFE_MOTION && IsPlayerClassActor(actor)) {
         motion = ANIM_IDLE;
     } else if (motion > PUPPET_MAX_BASIC_MOTION && !IsPlayerClassActor(actor)) {
         // Unknown to the friend's moveset for now: idle if still, else run.
