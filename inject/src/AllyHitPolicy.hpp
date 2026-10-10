@@ -23,7 +23,8 @@ namespace kh2coop::inject::allyhit {
 enum class Mode : std::uint8_t { Off, Trace, CoOp }; // PvP: reserved (see above)
 // Side of an actor in a hit: a player-class (objentry type 0) actor is the canonical local player
 // or another player (a party-native clone / puppet); anything else is Other.
-enum class Side : std::uint8_t { Other, LocalPlayer, RemotePlayer };
+// Companion: a native party member (objentry type 1: Donald, Goofy, world allies).
+enum class Side : std::uint8_t { Other, LocalPlayer, RemotePlayer, Companion };
 enum class Verdict : std::uint8_t { Native, Refuse };
 
 struct Pair {
@@ -39,6 +40,9 @@ constexpr bool BypassKind(std::uint8_t kind) { return kind == 5 || kind == 6; }
 // Only ever narrows the native answer.
 constexpr Verdict Decide(const Pair& p) {
     if (p.mode != Mode::CoOp || !p.nativeAllows) return Verdict::Native;
+    // A clone's team-0 mask includes the companions' team 1; the local player's attacks never
+    // reach them natively, so a clone's must not either (2026-10-10: Fire and swings hit Goofy).
+    if (p.attacker == Side::RemotePlayer && p.victim == Side::Companion && !BypassKind(p.kind)) return Verdict::Refuse;
     if (!PlayerSide(p.attacker) || !PlayerSide(p.victim)) return Verdict::Native;
     if (BypassKind(p.kind)) return Verdict::Native; // kept native (heal-like kinds; their effect between players is untested)
     return Verdict::Refuse; // clone -> local, local -> clone, clone -> clone
@@ -56,7 +60,7 @@ inline Mode ParseMode(const char* text, bool& valid) {
 }
 
 inline const char* SideName(Side s) {
-    return s == Side::LocalPlayer ? "local" : s == Side::RemotePlayer ? "clone" : "other";
+    return s == Side::LocalPlayer ? "local" : s == Side::RemotePlayer ? "clone" : s == Side::Companion ? "companion" : "other";
 }
 
 } // namespace kh2coop::inject::allyhit

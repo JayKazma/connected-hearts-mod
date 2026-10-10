@@ -48,16 +48,17 @@ static bool InstallMode(const char* text) { SetEnvironmentVariableA("KH2COOP_ALL
 int main() {
     // ---- pure policy
     const Mode M[] {Mode::Off, Mode::Trace, Mode::CoOp};
-    const Side S[] {Side::Other, Side::LocalPlayer, Side::RemotePlayer};
+    const Side S[] {Side::Other, Side::LocalPlayer, Side::RemotePlayer, Side::Companion};
     unsigned refusals = 0, cells = 0;
     for (auto m : M) for (auto a : S) for (auto v : S) for (bool n : {false, true}) for (int ki : {0, 4, 5, 6}) {
         const auto k = static_cast<std::uint8_t>(ki); ++cells;
         const bool refuse = Decide(Pair{m, a, v, n, k}) == Verdict::Refuse;
-        const bool want = m == Mode::CoOp && n && PlayerSide(a) && PlayerSide(v) && k != 5 && k != 6;
+        const bool pair = (PlayerSide(a) && PlayerSide(v)) || (a == Side::RemotePlayer && v == Side::Companion);
+        const bool want = m == Mode::CoOp && n && pair && k != 5 && k != 6;
         if (refuse != want) { ++g_fail; std::printf("FAIL decide m=%u a=%u v=%u n=%u k=%u\n", unsigned(m), unsigned(a), unsigned(v), unsigned(n), unsigned(k)); }
         refusals += refuse;
     }
-    CHECK("policy grid: refuses exactly co-op, native-allowed, player-to-player, non-5/6 kinds", refusals == 2 * 2 * 2 && cells == 3 * 3 * 3 * 2 * 4);
+    CHECK("policy grid: refuses exactly co-op, native-allowed, player-to-player or clone-to-companion, non-5/6 kinds", refusals == (2 * 2 + 1) * 2 && cells == 3 * 4 * 4 * 2 * 4);
     CHECK("policy: never widens a native refusal", Decide(Pair{Mode::CoOp, Side::RemotePlayer, Side::LocalPlayer, false, 0}) == Verdict::Native);
     CHECK("policy: enemies stay native", Decide(Pair{Mode::CoOp, Side::Other, Side::LocalPlayer, true, 0}) == Verdict::Native &&
                                        Decide(Pair{Mode::CoOp, Side::RemotePlayer, Side::Other, true, 0}) == Verdict::Native);

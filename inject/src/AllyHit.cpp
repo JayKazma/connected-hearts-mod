@@ -38,8 +38,9 @@ bool ReadActor(std::uintptr_t actor, std::uintptr_t player, ActorFacts& out) {
         if (obj <= g_base || obj >= g_base + 0x3000000) return true;
         std::memcpy(out.name, reinterpret_cast<const void*>(obj + OBJENTRY_NAME), sizeof(out.name) - 1);
         out.name[sizeof(out.name) - 1] = '\0';
-        if (*reinterpret_cast<const std::uint8_t*>(obj + OBJENTRY_TYPE) == 0)
-            out.side = actor == player ? Side::LocalPlayer : Side::RemotePlayer;
+        const auto type = *reinterpret_cast<const std::uint8_t*>(obj + OBJENTRY_TYPE);
+        if (type == 0) out.side = actor == player ? Side::LocalPlayer : Side::RemotePlayer;
+        else if (type == 1) out.side = Side::Companion;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -79,7 +80,7 @@ std::uint64_t __fastcall HookedCanHit(std::uintptr_t attack, std::uintptr_t vict
     const std::uintptr_t player = Player();
     ActorFacts v {};
     if (!ReadActor(victim, player, v)) { g_faults.fetch_add(1); return native; }
-    if (!PlayerSide(v.side)) return native; // cheap exit: only player-class victims matter
+    if (!PlayerSide(v.side) && v.side != Side::Companion) return native; // player-class or companion victims only
     AttackFacts a {};
     if (!ReadAttack(attack, a)) { g_faults.fetch_add(1); return native; }
     // The attacker: the owner (+0x10), or, as native also checks, the source (+0x14) when the owner is not a
