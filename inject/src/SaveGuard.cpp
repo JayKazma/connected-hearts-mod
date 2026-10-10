@@ -74,16 +74,24 @@ void Lower(wchar_t* text) {
 
 // Relative names are resolved against the current directory first, so a
 // save opened by a bare file name from inside the save folder still counts.
+// The game's settings file (audio, display, controls) lives beside the saves; it is never a
+// save, so it writes through. KH2COOP_SAVEGUARD=0 turns the guard off entirely (saves persist).
+constexpr wchar_t kSettingsFile[] = L"\\config1525.dat";
+bool g_disabled = false;
+
 bool IsGuardedPath(LPCWSTR path) {
-    if (!path) return false;
+    if (!path || g_disabled) return false;
     wchar_t full[1024];
     const DWORD n = GetFullPathNameW(path, 1024, full, nullptr);
     if (n == 0 || n >= 1024) {
         wcsncpy_s(full, path, _TRUNCATE);
     }
     Lower(full);
-    return std::wcsstr(full, kSaveFolder) != nullptr ||
-           (g_testDir[0] && std::wcsstr(full, g_testDir) == full);
+    const bool guarded = std::wcsstr(full, kSaveFolder) != nullptr ||
+                         (g_testDir[0] && std::wcsstr(full, g_testDir) == full);
+    if (!guarded) return false;
+    const size_t len = std::wcslen(full), tail = std::wcslen(kSettingsFile);
+    return !(len >= tail && std::wcscmp(full + len - tail, kSettingsFile) == 0);
 }
 
 // ANSI paths (the game's own imports are mostly the A variants).
@@ -506,14 +514,20 @@ bool Install(LogFn log) {
                   &g_removeDirectoryW);
     ok &= HookApi(L"kernelbase", "RemoveDirectoryA", reinterpret_cast<void*>(&HookedRemoveDirectoryA),
                   &g_removeDirectoryA);
+    {
+        char v[2] = {};
+        g_disabled = GetEnvironmentVariableA("KH2COOP_SAVEGUARD", v, sizeof(v)) == 1 && v[0] == '0';
+    }
     if (g_log) {
         char sandbox[MAX_PATH] = {};
         WideCharToMultiByte(CP_UTF8, 0, g_sandbox, -1, sandbox, MAX_PATH - 1, nullptr, nullptr);
-        if (!ok) {
+        if (g_disabled) {
+            g_log("  Save guard off (KH2COOP_SAVEGUARD=0): the game writes its saves and settings normally");
+        } else if (!ok) {
             g_log("  ERROR: save guard incomplete; saves are NOT protected");
         } else if (sandbox[0]) {
             g_log("  Save guard installed: writes under My Games\\KINGDOM HEARTS HD 1.5+2.5 ReMIX "
-                  "go to %s; deletes/moves/copies there are denied", sandbox);
+                  "go to %s; deletes/moves/copies there are denied; config1525.dat (settings) writes through", sandbox);
         } else {
             g_log("  Save guard installed without a sandbox: all writes there are denied");
         }
