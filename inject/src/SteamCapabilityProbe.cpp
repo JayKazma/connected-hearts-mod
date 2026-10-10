@@ -1,4 +1,5 @@
 #include "SteamCapabilityProbe.hpp"
+#include "SharedLogFile.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -220,9 +221,8 @@ void Run(HANDLE stopEvent) noexcept {
         GetFileAttributesW(directory) == INVALID_FILE_ATTRIBUTES) return;
     wchar_t path[32768]{};
     if (swprintf_s(path, L"%s\\steam-capability_%lu.log", directory, GetCurrentProcessId()) < 0) return;
-    FILE* log = nullptr;
-    if (_wfopen_s(&log, path, L"wx") != 0 || !log) return; // Never overwrite a receipt.
-    setvbuf(log, nullptr, _IONBF, 0);
+    FILE* log = CreateSharedLogW(path); // create-new: never overwrite a receipt (works on msvcrt and UCRT)
+    if (!log) return;
     try { Observe(log, stopEvent); }
     catch (...) { std::fprintf(log, "[steam-probe] exception unavailable\n"); }
     std::fclose(log);
