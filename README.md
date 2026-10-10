@@ -1,4 +1,4 @@
-# KH2 Co-op (mod)
+# Connected Hearts (mod)
 
 Online co-op for Kingdom Hearts II Final Mix (PC, Steam). Two players run their
 own copies of the game; the other player appears in your party as a second

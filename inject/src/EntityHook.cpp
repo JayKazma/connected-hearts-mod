@@ -2229,6 +2229,37 @@ static void Install(uintptr_t exeBase) {
 }
 } // namespace clonewpn
 
+// The field command (exe+0x2A10620) is one object shared by every player-class actor (+0xDC0).
+// Each such actor's update ticks it (type slot +0x18 = 0x3A8980), and the tick reads the pad and
+// moves the command-menu cursor. With a Sora clone in the party the menu was ticked twice a
+// frame, so one press moved the cursor two rows: Attack -> Items, Magic never reachable
+// (2026-10-10). A driven clone's tick is skipped; its commands come from the stream (cast replay).
+namespace clonefc {
+static constexpr uintptr_t RVA_FC_TICK = 0x3A8980;
+static constexpr uintptr_t RVA_NATIVE_PLAYER = 0x2A105D0, RVA_FIELD_COMMAND = 0x2A10620;
+static constexpr uint8_t kBytes[] = {0x48, 0x8B, 0x89, 0xC0, 0x0D, 0x00, 0x00, 0x48, 0x85, 0xC9, 0x0F, 0x85};
+using PFN_Tick = void(__fastcall*)(uintptr_t actor);
+static PFN_Tick g_orig = nullptr;
+static unsigned g_skipped = 0;
+static void __fastcall Hooked(uintptr_t actor) {
+    __try {
+        const uintptr_t player = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_NATIVE_PLAYER);
+        if (actor != player && player != 0 && *reinterpret_cast<const uintptr_t*>(actor + 0xDC0) == g_exeBase + RVA_FIELD_COMMAND && clonewpn::CloneAlive(actor)) {
+            if (g_skipped++ == 0) Log("[fc] skipping the shared field-command tick for clone %p (menu input is the local player's)", reinterpret_cast<void*>(actor));
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_orig(actor);
+}
+static void Install(uintptr_t exeBase) {
+    void* addr = reinterpret_cast<void*>(exeBase + RVA_FC_TICK);
+    if (std::memcmp(addr, kBytes, sizeof(kBytes)) != 0) { Log("[fc] tick bytes don't match; clone still ticks the command menu"); return; }
+    MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&Hooked), reinterpret_cast<void**>(&g_orig));
+    if (st == MH_OK) st = MH_EnableHook(addr);
+    Log(st == MH_OK ? "[fc] clone field-command tick guard ready" : "[fc] tick hook failed: %d", st);
+}
+} // namespace clonefc
+
 #include "DownedSpectate.inl"
 
 #include "CloneNeutralInput.inl"
@@ -4650,6 +4681,7 @@ bool Initialize(uintptr_t exeBase) {
     clonecast::Install(exeBase);    // cast replay on clones (needs the neutral-input window; KH2COOP_CAST_REPLAY=0 off)
     clonewpn::Install(exeBase);     // clones carry their owner's keyblade (KH2COOP_WEAPON_SYNC=0 off)
     cmdlookup::Install(exeBase);    // command table misses answered, not dereferenced
+    clonefc::Install(exeBase);      // one command-menu tick per frame, the local player's
     menuparty::Install(exeBase);    // the other player's Sora is not editable from the pause menu
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
