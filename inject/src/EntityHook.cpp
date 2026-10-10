@@ -1430,6 +1430,13 @@ static bool ReplayableKind(int kind) { return kind == 2 || kind == 3; }
 
 static uintptr_t __fastcall HookedFcExecute(void* actor, const uint16_t* record) {
     const auto result = g_origFcExecute(actor, record);
+    __try { // clone side: did the game run the replayed record? (id non-zero only during a replay window)
+        if (reinterpret_cast<uintptr_t>(actor) != g_soraActor && record && record[0] != 0 && g_logged < 60) {
+            ++g_logged;
+            Log("[cast] frame %u executor on %p: id=%u record1=%u flags=%02X -> entry=%p%s", g_frameCounter, actor, record[0], record[1],
+                reinterpret_cast<const uint8_t*>(record)[4], reinterpret_cast<void*>(result), result ? "" : " (refused)");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (result == 0 || reinterpret_cast<uintptr_t>(actor) != g_soraActor) return result;
     __try {
         const uint16_t id = record[0];
@@ -2799,19 +2806,9 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     // Fire cast) on a clone crashed the game (VUH-1489, 2026-10-02), so it's
     // held at idle until the spell path is understood. Attack 151 and the
     // basic motions play fine.
-    if (d.nativeCastUntil != 0 && IsPlayerClassActor(actor)) {
-        // The clone is running a replayed command itself (clonecast): its own command path owns the
-        // motion (Fire is 56, items 9...) until the owner's stream is back on a locomotion clip or
-        // the window times out. Touching the clip here restarted the cast every frame.
-        const bool loco = motion == ANIM_IDLE || motion == ANIM_WALK || motion == ANIM_RUN;
-        if (g_frameCounter < d.nativeCastUntil && !loco) {
-            d.lastAnim = static_cast<int>(motion);
-            d.pendingMotion = -1; d.pendingFrames = 0;
-            return;
-        }
-        d.nativeCastUntil = 0;
-    }
     if (motion == PUPPET_CLONE_UNSAFE_MOTION && IsPlayerClassActor(actor)) {
+        // A replayed command (clonecast) sets motion 9 itself with the state the raw set lacked.
+        if (g_frameCounter < d.nativeCastUntil) { d.lastAnim = static_cast<int>(motion); d.pendingMotion = -1; d.pendingFrames = 0; return; }
         motion = ANIM_IDLE;
     } else if (motion > PUPPET_MAX_BASIC_MOTION && !IsPlayerClassActor(actor)) {
         // Unknown to the friend's moveset for now: idle if still, else run.
