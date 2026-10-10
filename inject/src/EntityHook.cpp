@@ -1097,12 +1097,37 @@ static void OpenHitChannel() {
     Log("  Hit channel open (Local\\kh2coop_hit_%lu)", GetCurrentProcessId());
 }
 
+namespace cmdlookup { static const uint8_t* Find(int id); }
 static int __fastcall HookedLimitMenuState(void* actor, uint16_t* cmd, int state) {
     const int result = g_origLimitMenuState(actor, cmd, state);
-    if (g_anyPuppetActive && cmd != nullptr && g_limitByCmd(*cmd) != 0) {
-        return LIMIT_STATE_GREYED;
+    const bool limit = cmd != nullptr && g_limitByCmd(*cmd) != 0;
+    const int out = g_anyPuppetActive && limit ? LIMIT_STATE_GREYED : result;
+    if (cmd != nullptr) { // which commands the menu shows, and the limit table they are matched against (magic skipped, 2026-10-10)
+        static uint16_t seen[48] {}; static unsigned n = 0; static bool dumped = false;
+        if (!dumped) {
+            dumped = true;
+            __try {
+                const uintptr_t tbl = *reinterpret_cast<const uintptr_t*>(g_exeBase + 0x2AE5690);
+                const int count = tbl ? *reinterpret_cast<const int32_t*>(tbl + 4) : 0;
+                Log("[cmdmenu] limit table %p: %d rows", reinterpret_cast<void*>(tbl), count);
+                for (int k = 0; k < count && k < 64; ++k) {
+                    const uint8_t* row = reinterpret_cast<const uint8_t*>(tbl + 8 + static_cast<uintptr_t>(k) * 0x40);
+                    Log("[cmdmenu]  row %d: id %u members %u/%u/%u cmd %u (0x%X) ability %u world %d bytes %02X%02X%02X%02X %02X%02X%02X%02X", k,
+                        *reinterpret_cast<const uint16_t*>(row), row[1], row[2], row[3], *reinterpret_cast<const uint16_t*>(row + 0x28), *reinterpret_cast<const uint16_t*>(row + 0x28),
+                        *reinterpret_cast<const uint16_t*>(row + 0x2A), row[0x2C], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[cmdmenu] limit table dump faulted"); }
+        }
+        bool known = false;
+        for (unsigned k = 0; k < n; ++k) if (seen[k] == *cmd) known = true;
+        if (!known && n < 48) {
+            seen[n++] = *cmd;
+            const uint8_t* row = cmdlookup::Find(*cmd);
+            Log("[cmdmenu] command id %u (0x%X, word1 0x%X) state in %d -> game %d -> shown %d%s; table row kind %d arg %d", *cmd, *cmd, cmd[1], state, result, out, limit ? " (limit row)" : "",
+                row ? *reinterpret_cast<const int16_t*>(row + 2) : -1, row ? *reinterpret_cast<const int16_t*>(row + 4) : -1);
+        }
     }
-    return result;
+    return out;
 }
 
 static uintptr_t __fastcall HookedLimitUsable(uint32_t cmdId) {
@@ -1569,6 +1594,50 @@ static void Install(uintptr_t exeBase) {
     Log(st == MH_OK ? "[cmd] lookup guard ready" : "[cmd] lookup hook failed: %d", st);
 }
 } // namespace cmdlookup
+
+// The pause menu lists the world party record's seats (0x2FC360 fills the list the Items,
+// Equipment and Abilities screens share: count at +0, then 0x20-byte rows at +8: +0 seat, +2
+// character id, +8 save record, +16 objentry). With the one-clone party the other player's Sora
+// sits in a friend seat, so the menu showed a second "Sora" whose equipment and abilities edit
+// the same save record and queue weapon swaps for the local Sora. That row is dropped.
+namespace menuparty {
+static constexpr uintptr_t RVA_FILL = 0x2FC360;
+static constexpr uint8_t kBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41};
+using PFN_Fill = void(__fastcall*)(int32_t* list, uintptr_t partyRecord);
+static PFN_Fill g_orig = nullptr;
+static unsigned g_logged = 0;
+
+static void __fastcall Hooked(int32_t* list, uintptr_t partyRecord) {
+    g_orig(list, partyRecord);
+    __try {
+        int count = list[0];
+        if (count < 2 || count > 4) return;
+        auto* rows = reinterpret_cast<uint8_t*>(list) + 8;
+        for (int k = 1; k < count;) {
+            uint8_t* row = rows + k * 0x20;
+            const int16_t seat = *reinterpret_cast<const int16_t*>(row);
+            const int16_t charId = *reinterpret_cast<const int16_t*>(row + 2);
+            if (charId == 1 && seat != 0) {
+                if (g_logged < 10) { ++g_logged; Log("[menu] party list: Sora in seat %d (the other player) hidden from the pause menu", seat); }
+                std::memmove(row, row + 0x20, static_cast<size_t>(count - k - 1) * 0x20);
+                std::memset(rows + (count - 1) * 0x20, 0, 0x20);
+                --count;
+                continue;
+            }
+            ++k;
+        }
+        list[0] = count;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void Install(uintptr_t exeBase) {
+    void* addr = reinterpret_cast<void*>(exeBase + RVA_FILL);
+    if (std::memcmp(addr, kBytes, sizeof(kBytes)) != 0) { Log("[menu] party list bytes don't match; the other player stays listed"); return; }
+    MH_STATUS st = MH_CreateHook(addr, reinterpret_cast<void*>(&Hooked), reinterpret_cast<void**>(&g_orig));
+    if (st == MH_OK) st = MH_EnableHook(addr);
+    Log(st == MH_OK ? "[menu] party list filter ready" : "[menu] party list hook failed: %d", st);
+}
+} // namespace menuparty
 
 // ============================================================================
 // Weapon sync: a clone carries the keyblade its owner has equipped
@@ -2068,8 +2137,20 @@ static void Drop(const char* why) {
 }
 
 // Game thread, each frame a Sora clone is driven.
+// Only a Sora clone carries a keyblade. A puppet can point at a friend actor for a frame or two
+// around a room change (the gauge sees the same); the swap ran on Goofy once, destroyed his
+// shield and loaded one of his shields as "the keyblade" (client crash, 2026-10-10).
+static bool IsSoraActor(uintptr_t actor) {
+    __try {
+        const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
+        if (objentry < 0x10000) return false;
+        return *reinterpret_cast<const uint8_t*>(objentry + 4) == 0 && *reinterpret_cast<const uint16_t*>(objentry + OBJENTRY_CHAR_ID) == 1 && *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS) == 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 static void Tick(int i, uintptr_t actor) {
     if (!g_enabled || !g_ready || actor == 0 || i < 0 || i > 1) return;
+    if (!IsSoraActor(actor)) { if (g_pending.active && g_pending.puppet == i) Drop("the puppet points at a non-Sora actor"); return; }
     Diag(i, actor);
     {
         static uint32_t lastPeriodic = 0;
@@ -4021,6 +4102,20 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
                 // Track Sora's actor — he's always the entity list head.
                 // Needed for entity-level movement suppression.
                 g_soraActor = addr;
+                {   // The launcher enables Connect on this line: a save is loaded and the player is in a field
+                    static bool fieldLogged = false;
+                    if (!fieldLogged && g_resolveHandle) {
+                        __try {
+                            const uintptr_t oe = g_resolveHandle(*reinterpret_cast<const uint32_t*>(addr + 8));
+                            const uint8_t world = *reinterpret_cast<const uint8_t*>(g_exeBase + 0x717008);
+                            const uint8_t room = *reinterpret_cast<const uint8_t*>(g_exeBase + 0x717009);
+                            if (oe > 0x10000 && *reinterpret_cast<const uint8_t*>(oe + 4) == 0 && world > 0 && world < 0x13) {
+                                fieldLogged = true;
+                                Log("[field] save loaded: world %02X room %02X", world, room);
+                            }
+                        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                    }
+                }
                 downedspike::Tick(addr);
 
                 // Hand pending room warps to the game on its own thread.
@@ -4555,6 +4650,7 @@ bool Initialize(uintptr_t exeBase) {
     clonecast::Install(exeBase);    // cast replay on clones (needs the neutral-input window; KH2COOP_CAST_REPLAY=0 off)
     clonewpn::Install(exeBase);     // clones carry their owner's keyblade (KH2COOP_WEAPON_SYNC=0 off)
     cmdlookup::Install(exeBase);    // command table misses answered, not dereferenced
+    menuparty::Install(exeBase);    // the other player's Sora is not editable from the pause menu
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the
