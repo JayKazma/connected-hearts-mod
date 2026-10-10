@@ -86,7 +86,7 @@ void testCodec() {
     AvatarRelay received;
     read(r, received);
     const auto& b = received.avatar;
-    check(size == 104 && pkt.size() == 107 && r.atEnd(), "v11 relay has exact 104-byte payload");
+    check(size == 112 && pkt.size() == 115 && r.atEnd(), "v15 relay has exact 112-byte payload");
     check(received.ownerConnectionId == sent.ownerConnectionId, "relay preserves full 64-bit connection identity");
     check(type == PacketType::AvatarRelay, "avatar relay packet type");
     check(b.seq == a.seq && b.serverTimeMs == a.serverTimeMs &&
