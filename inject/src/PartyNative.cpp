@@ -592,6 +592,7 @@ void Observer(std::uint16_t* resolved, const playerkit::LoadContext& c) {
     in.intentWorld = choice.world; in.intentRoom = choice.room; in.intentEvt = choice.evt;
     in.kit1 = choice.kit1; in.kit2 = choice.kit2; in.localKit = choice.localKit;
     in.native0 = c.resolved0; // R3-1: PlayerKit captured it before its own member-0 write
+    if (!privatestatus::Ready()) privatestatus::TryRearm(g_log);
     in.privateStatusReady = privatestatus::Ready();
     in.neutralInputReady = NeutralReady();
     bool ok = false;

@@ -36,6 +36,7 @@ uintptr_t g_base{};
 std::atomic<bool> g_requested{},g_retained{},g_attempted{},g_ready{};
 std::atomic<std::uint64_t> g_faults{},g_fiberThreads{},g_scopeAbandoned{},g_serial{},g_drops{},g_vetoes{},g_foreign{},g_stale{};
 std::atomic<unsigned> g_installed{};
+std::atomic<std::uint64_t> g_rearmed{};bool g_stopped=false; // TryRearm
 // Accessed by checked x64 gateways with byte loads/stores; naturally atomic.
 // Interlocked APIs are used in C++ for the same storage, never std::atomic aliasing.
 alignas(64) volatile char g_owned[PoolCount]{};
@@ -552,7 +553,21 @@ bool Initialize(uintptr_t base) {
     for(auto i:order)if(ok){ok=MH_EnableHook(g_hooks[i].target)==MH_OK;if(ok)g_installed.fetch_or(1u<<i);}
     if(ok)g_ready=true;else Fault();SetLastError(error);return ok;
 }
-void StopNewAllocations(){g_ready=false;}
+void StopNewAllocations(){g_ready=false;g_stopped=true;}
+// A stamp race (bind fault 9/10/11: the load changed between a clone's build and the canonical
+// Sora's) used to retire the module for the rest of the session, so every later room fell back to
+// companions. With nothing pending, no record owned and the hooks installed, the next room is a
+// clean start; re-arm. Other faults (read failures, pointer mismatches) stay permanent.
+bool TryRearm(LogFn log) {
+    if(g_ready.load() || g_stopped || g_installed.load()!=255 || !spawncontroller::IsDiagnosticGameThread())return false;
+    const unsigned reason=g_bindFault.load();
+    if(reason!=9 && reason!=10 && reason!=11)return false;
+    if(g_pending.armed || g_party.open)return false;
+    for(unsigned i=0;i<PoolCount;++i)if(_InterlockedCompareExchange8(&g_owned[i],0,0))return false;
+    g_bindFault=0;g_spent=false;g_ready=true;g_rearmed.fetch_add(1);
+    if(log)log("[privatestatus] re-armed after bind fault %u (clean state: nothing pending, no owned record); rearms=%llu",reason,g_rearmed.load());
+    return true;
+}
 bool RetainsMinHookResources(){return g_retained.load();}
 bool Ready(){return g_ready.load();}
 void Drain(LogFn log) {

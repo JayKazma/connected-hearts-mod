@@ -8,6 +8,7 @@ void EnableEnemyTargetScope();
 bool Initialize(std::uintptr_t base);
 void Drain(LogFn log);
 void StopNewAllocations(); // Existing ownership/veto remains until native release.
+bool TryRearm(LogFn log);   // game thread, on a room load: recover from a stamp-race bind fault when the state is clean
 bool RetainsMinHookResources();
 // VUH-1519: true while every hook is installed and no fault has disarmed selection.
 // PartyNative refuses to spawn clones otherwise (they would share Sora's SAVE-bound record).
