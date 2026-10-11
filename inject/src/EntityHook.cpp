@@ -2625,6 +2625,113 @@ static void Install(uintptr_t exeBase) {
 }
 } // namespace cutscenesync
 
+// Diagnostic: which game paths start events that the trigger hook (0x3F60D0) does not see.
+// 0x3AD2D0 installs a prepared event context; its four callers are area events (0x3FB000),
+// mission/minigame starts (0x3FC7A0), AI-script events (0x3D8CF0) and object events (0x3DB2F0).
+// Each call logs its arguments, the caller chain (exe RVAs) and the location. Logging only.
+namespace eventdiag {
+struct Sig { uintptr_t rva; uint8_t bytes[12]; };
+static constexpr Sig kSink {0x3AD2D0, {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48}};
+static constexpr Sig kArea {0x3FB000, {0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48}};
+static constexpr Sig kMission {0x3FC7A0, {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89}};
+static constexpr Sig kAi {0x3D8CF0, {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89}};
+static constexpr Sig kObj {0x3DB2F0, {0x48, 0x89, 0x5C, 0x24, 0x18, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x4C, 0x8B}};
+using SinkFn = void(__fastcall*)(void*);
+using AreaFn = void(__fastcall*)(uint32_t*, uint64_t, char);
+using MissionFn = int*(__fastcall*)(int*, int64_t, int);
+using AiFn = void(__fastcall*)(uint32_t*, const char*, float, uint8_t);
+using ObjFn = void(__fastcall*)(int64_t, const char*, int64_t);
+static SinkFn g_sink = nullptr; static AreaFn g_area = nullptr; static MissionFn g_mission = nullptr;
+static AiFn g_ai = nullptr; static ObjFn g_obj = nullptr;
+static int g_logged = 0;
+
+static void Chain(char* out, size_t cap) {
+    void* frames[8] {};
+    const USHORT n = RtlCaptureStackBackTrace(2, 8, frames, nullptr);
+    int w = 0;
+    for (USHORT i = 0; i < n && w >= 0 && static_cast<size_t>(w) < cap - 12; ++i) {
+        const auto a = reinterpret_cast<uintptr_t>(frames[i]);
+        if (a >= g_exeBase && a < g_exeBase + 0x3000000) w += std::snprintf(out + w, cap - w, " %llX", static_cast<unsigned long long>(a - g_exeBase));
+    }
+}
+static void Where(char* out, size_t cap) {
+    __try {
+        std::snprintf(out, cap, "%02X/%02X evt %u", *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID),
+                      *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID), *reinterpret_cast<const uint16_t*>(g_exeBase + offsets::EVENT_PROGRAM));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { std::snprintf(out, cap, "?"); }
+}
+static bool Budget() { return g_logged++ < 200; }
+static void Name4(const char* s, char out[5]) {
+    out[0] = 0;
+    __try { for (int i = 0; i < 4; ++i) { const char c = s ? s[i] : 0; out[i] = (c >= 0x20 && c < 0x7F) ? c : (c ? '.' : 0); if (!c) break; } out[4] = 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = '?'; out[1] = 0; }
+}
+static uint32_t ActorObjId(uintptr_t actor) {
+    __try {
+        if (!actor || !g_resolveHandle) return 0;
+        const uintptr_t e = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + 0x8)); // objentry handle (as clonewpn)
+        return e ? *reinterpret_cast<const uint32_t*>(e) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static void __fastcall HookedSink(void* ctx) {
+    if (Budget()) {
+        char chain[160] = {}, where[32] = {}; Chain(chain, sizeof(chain)); Where(where, sizeof(where));
+        uint32_t kind = 0; uint64_t data = 0;
+        __try { kind = *reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(ctx)); data = *reinterpret_cast<const uint64_t*>(reinterpret_cast<uintptr_t>(ctx) + 8); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        Log("[eventdiag] start ctx=%p word0=%X data=%llX at %s chain%s", ctx, kind, static_cast<unsigned long long>(data), where, chain);
+    }
+    g_sink(ctx);
+}
+static void __fastcall HookedArea(uint32_t* d, uint64_t p2, char p3) {
+    if (Budget()) {
+        uint32_t w[12] = {};
+        __try { std::memcpy(w, d, sizeof(w)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        char where[32] = {}; Where(where, sizeof(where));
+        Log("[eventdiag] area event at %s: id=%X w4=%X w6..11=%X %X %X %X %X %X p2=%llX p3=%d", where, w[0], w[4], w[6], w[7], w[8], w[9], w[10], w[11],
+            static_cast<unsigned long long>(p2), p3);
+    }
+    g_area(d, p2, p3);
+}
+static int* __fastcall HookedMission(int* d, int64_t p2, int kind) {
+    if (Budget()) { char where[32] = {}; Where(where, sizeof(where)); Log("[eventdiag] mission start kind=%d event=%llX at %s", kind, static_cast<unsigned long long>(p2), where); }
+    return g_mission(d, p2, kind);
+}
+static void __fastcall HookedAi(uint32_t* h, const char* name, float f, uint8_t b) {
+    if (Budget()) {
+        char n[5]; Name4(name, n); char where[32] = {}; Where(where, sizeof(where));
+        uint32_t hs[5] = {}; __try { std::memcpy(hs, h, sizeof(hs)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        const uintptr_t actor = g_resolveHandle ? g_resolveHandle(hs[3]) : 0;
+        Log("[eventdiag] ai-script event '%s' at %s: handles %X %X %X %X %X actor3 objId=0x%X f=%.2f b=%u", n, where, hs[0], hs[1], hs[2], hs[3], hs[4], ActorObjId(actor), f, b);
+    }
+    g_ai(h, name, f, b);
+}
+static void __fastcall HookedObj(int64_t actor, const char* name, int64_t p3) {
+    if (Budget()) {
+        char n[5]; Name4(name, n); char where[32] = {}; Where(where, sizeof(where));
+        char chain[160] = {}; Chain(chain, sizeof(chain));
+        Log("[eventdiag] object event '%s' at %s: actor %llX objId=0x%X p3=%llX chain%s", n, where, static_cast<unsigned long long>(actor),
+            ActorObjId(static_cast<uintptr_t>(actor)), static_cast<unsigned long long>(p3), chain);
+    }
+    g_obj(actor, name, p3);
+}
+
+template <typename F> static void Hook(uintptr_t exeBase, const Sig& s, void* detour, F* orig, const char* what) {
+    void* at = reinterpret_cast<void*>(exeBase + s.rva);
+    if (std::memcmp(at, s.bytes, sizeof(s.bytes)) != 0) { Log("[eventdiag] %s bytes differ; not hooked", what); return; }
+    if (MH_CreateHook(at, detour, reinterpret_cast<void**>(orig)) != MH_OK || MH_EnableHook(at) != MH_OK) { *orig = nullptr; Log("[eventdiag] %s hook failed", what); }
+}
+static void Install(uintptr_t exeBase) {
+    Hook(exeBase, kSink, reinterpret_cast<void*>(&HookedSink), &g_sink, "event start");
+    Hook(exeBase, kArea, reinterpret_cast<void*>(&HookedArea), &g_area, "area event");
+    Hook(exeBase, kMission, reinterpret_cast<void*>(&HookedMission), &g_mission, "mission start");
+    Hook(exeBase, kAi, reinterpret_cast<void*>(&HookedAi), &g_ai, "ai-script event");
+    Hook(exeBase, kObj, reinterpret_cast<void*>(&HookedObj), &g_obj, "object event");
+    Log("[eventdiag] logging event starts (0x3AD2D0 and its callers)");
+}
+} // namespace eventdiag
+
 #include "DownedSpectate.inl"
 
 #include "CloneNeutralInput.inl"
@@ -5082,6 +5189,7 @@ bool Initialize(uintptr_t exeBase) {
     cmdlookup::Install(exeBase);    // command table misses answered, not dereferenced
     clonefc::Install(exeBase);      // one command-menu tick per frame, the local player's
     cutscenesync::Install(exeBase); // cutscenes watched together, skips shared (KH2COOP_CUTSCENE_SYNC=0 off)
+    eventdiag::Install(exeBase);    // logging only: event starts outside the trigger hook
     menuparty::Install(exeBase);    // the other player's Sora is not editable from the pause menu
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
