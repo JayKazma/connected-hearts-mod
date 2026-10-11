@@ -1,0 +1,4 @@
+#define CH_DESC "Connected Hearts local relay (solo test)"
+#define CH_FILE "connected_hearts_relay.exe"
+#define CH_TYPE VFT_APP
+#include "../common/version/VersionInfo.rc.inc"

@@ -1,0 +1,4 @@
+#define CH_DESC "Connected Hearts co-op mod for KINGDOM HEARTS II FINAL MIX"
+#define CH_FILE "connected_hearts.dll"
+#define CH_TYPE VFT_DLL
+#include "../common/version/VersionInfo.rc.inc"

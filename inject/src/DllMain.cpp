@@ -4,8 +4,9 @@
 // Loading methods:
 //   1. Panacea plugin (recommended): place connected_hearts.dll in the
 //      mod's dll/ folder. Panacea calls OnInit/OnFrame automatically.
-//   2. Manual injection: use LoadLibrary or any DLL injector. DllMain
-//      spawns an init thread that installs hooks after a short delay.
+//   2. Connected Hearts loader: winmm.dll in the game folder loads this DLL and
+//      calls OnPreBoot at the game's entry point (hooks before the game boots).
+//   3. Manual LoadLibrary: DllMain spawns an init thread that installs hooks.
 //      Explicit unloaders must call OnShutdown() before FreeLibrary.
 //
 // Both methods converge on kh2coop::inject::Initialize() which installs
@@ -208,6 +209,18 @@ extern "C" {
 __declspec(dllexport) void OnInit(const wchar_t* modPath) {
     (void)modPath;
     TryInit();
+}
+
+// Connected Hearts loader (winmm.dll in the game folder) calls this on the game's main thread at
+// its entry point, before the game's own code runs: hooks (the save guard first) are in place
+// before boot. If the init thread got there first, wait for it.
+__declspec(dllexport) BOOL OnPreBoot(DWORD timeoutMs) {
+    for (DWORD waited = 0;; waited += 10) {
+        if (g_initDone.load(std::memory_order_acquire)) return TRUE;
+        if (!g_initStarted.load(std::memory_order_acquire) && TryInit()) return TRUE;
+        if (waited >= timeoutMs) return FALSE;
+        Sleep(10);
+    }
 }
 
 __declspec(dllexport) void OnFrame() {

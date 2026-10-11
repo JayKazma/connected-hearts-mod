@@ -139,6 +139,9 @@ add_executable(kh2coop_server
 
 target_link_libraries(kh2coop_server PRIVATE kh2coop_server_core)
 set_target_properties(kh2coop_server PROPERTIES OUTPUT_NAME "connected_hearts_relay")
+if(WIN32)
+    target_sources(kh2coop_server PRIVATE server/version.rc)
+endif()
 
 # ---------------------------------------------------------------------------
 # kh2coop_runtime — runtime library (GameBridgePC + controllers).
@@ -164,6 +167,9 @@ add_executable(kh2coop_runtime_scaffold
 
 target_link_libraries(kh2coop_runtime_scaffold PRIVATE kh2coop_runtime kh2coop_server_core)
 set_target_properties(kh2coop_runtime_scaffold PROPERTIES OUTPUT_NAME "connected_hearts_runtime")
+if(WIN32)
+    target_sources(kh2coop_runtime_scaffold PRIVATE runtime/version.rc)
+endif()
 
 # ---------------------------------------------------------------------------
 # kh2coop_fake_sim — end-to-end test: 3 fake clients + server, no KH2.
@@ -327,6 +333,7 @@ if(WIN32)
     endif()
     add_subdirectory(tools/kh2ctl)
     add_subdirectory(inject)
+    add_subdirectory(loader)
 
     # Actual trace scope/queue code with synthetic native callbacks and deliberate
     # SEH. The test supplies unavailable MinHook stubs; it never installs hooks

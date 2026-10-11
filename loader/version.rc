@@ -1,0 +1,4 @@
+#define CH_DESC "Connected Hearts game-folder loader (passes winmm calls to Windows, loads the mod for a co-op session)"
+#define CH_FILE "winmm.dll"
+#define CH_TYPE VFT_DLL
+#include "../common/version/VersionInfo.rc.inc"
