@@ -214,7 +214,13 @@ void BeginTransition() {
 
 void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t fade,
                                         int mode, std::uint8_t flag, int extra) {
-    if (enemysync::HasClientAuthority() && g_eventExitUntilMs != 0 && GetTickCount64() < g_eventExitUntilMs) {
+    // An event's own closing jump: requested while the event is still running, or just after it ended.
+    bool inEvent = false;
+    __try {
+        inEvent = *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::EVENT_CONTEXT) != 0 ||
+                  *reinterpret_cast<const std::int32_t*>(g_exeBase + offsets::CUTSCENE_STATE) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (enemysync::HasClientAuthority() && (inEvent || (g_eventExitUntilMs != 0 && GetTickCount64() < g_eventExitUntilMs))) {
         g_eventExitUntilMs = 0; // one scripted exit per followed event: the same jump the host's event made
         g_eventFollowLoad = g_loadSerial; // where this load lands counts as followed too
         if (g_log) g_log("[warp] client native exit allowed (end of an event) target=%02X/%02X door=%u map=%u btl=%u evt=%u",

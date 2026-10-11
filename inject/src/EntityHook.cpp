@@ -419,6 +419,7 @@ struct PuppetDriver {
     uint32_t poseFrame = 0;      // DLL frame of the latest new pose
     uintptr_t actor = 0;         // actor we last drove (re-resolved per frame)
     int lastAnim = -1;           // motion we last set on `actor`
+    uint32_t missingLogged = 0;  // last motion logged as missing from the clone's set
     uint32_t savedTeam = 0;      // `actor`'s team before we zeroed it
     bool teamSaved = false;
     bool savedNoCollide = false; // `actor`'s no-collision bit before we set it
@@ -3937,6 +3938,14 @@ static void BindPuppetDrive(int index, uintptr_t actor) {
     d.applied = true;
 }
 
+// Motion slot -> motion-set index for an actor's motion controller (0x3C7C50); -1 when the actor's
+// motion set has no clip for the slot (the clone would T-pose), e.g. the skateboard moves, which
+// only the player's board set carries.
+using PFN_MotionIndex = int(__fastcall*)(void* motCtrl, int slot);
+static PFN_MotionIndex g_motionIndex = nullptr;
+static constexpr uint8_t kMotionIndexBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18,
+                                                0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20};
+
 static void DrivePuppetMotion(void* actorObj, int index) {
     if (!IsPuppetActive(index) || PuppetTarget(index) != reinterpret_cast<uintptr_t>(actorObj)) return;
     const auto actor = reinterpret_cast<uintptr_t>(actorObj);
@@ -3967,6 +3976,17 @@ static void DrivePuppetMotion(void* actorObj, int index) {
         // Unknown to the friend's moveset for now: idle if still, else run.
         const float speed2 = pose.velocity.x * pose.velocity.x + pose.velocity.z * pose.velocity.z;
         motion = speed2 > 1.0f ? ANIM_RUN : ANIM_IDLE;
+    }
+    // A clip this clone's motion set lacks (skateboard, minigame moves): run if moving, else idle.
+    if (g_motionIndex && motion != ANIM_IDLE && motion != ANIM_WALK && motion != ANIM_RUN) {
+        int idx = 0;
+        __try { idx = g_motionIndex(reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), static_cast<int>(motion)); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { idx = 0; }
+        if (idx < 0) {
+            if (d.missingLogged != motion) { d.missingLogged = motion; Log("[puppet %d] motion %u not in the clone's set; using run/idle", index, motion); }
+            const float speed2 = pose.velocity.x * pose.velocity.x + pose.velocity.z * pose.velocity.z;
+            motion = speed2 > 1.0f ? ANIM_RUN : ANIM_IDLE;
+        }
     }
     // VUH-1787: a held pose idles in place after a short grace (downed keeps its clip).
     motion = puppethold::HeldMotion(motion, pose.flags, d.heldClock.Frames(g_frameCounter), ANIM_IDLE);
@@ -4806,6 +4826,9 @@ bool Initialize(uintptr_t exeBase) {
     g_setMotionSimple = reinterpret_cast<PFN_SetMotionSimple>(exeBase + RVA_SET_MOTION_SIMPLE);
     g_setAnimationDirect = reinterpret_cast<PFN_SetAnimationDirect>(
         exeBase + RVA_SET_ANIMATION_DIRECT);
+    if (std::memcmp(reinterpret_cast<const void*>(exeBase + 0x3C7C50), kMotionIndexBytes, sizeof(kMotionIndexBytes)) == 0)
+        g_motionIndex = reinterpret_cast<PFN_MotionIndex>(exeBase + 0x3C7C50);
+    else Log("  Motion lookup bytes don't match; clones may T-pose on moves their set lacks");
     g_setAnimationUnderlying = reinterpret_cast<PFN_SetAnimationDirect>(
         exeBase + RVA_SET_ANIMATION_UNDERLYING);
     Log("  SetMotion: 0x%llX  SetMotionSimple: 0x%llX  SetAnimDirect: 0x%llX",
