@@ -217,7 +217,7 @@ void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t 
     if (enemysync::HasClientAuthority() && g_eventExitUntilMs != 0 && GetTickCount64() < g_eventExitUntilMs) {
         g_eventExitUntilMs = 0; // one scripted exit per followed event: the same jump the host's event made
         g_eventFollowLoad = g_loadSerial; // where this load lands counts as followed too
-        if (g_log) g_log("[warp] client native exit allowed (followed event) target=%02X/%02X door=%u map=%u btl=%u evt=%u",
+        if (g_log) g_log("[warp] client native exit allowed (end of an event) target=%02X/%02X door=%u map=%u btl=%u evt=%u",
                          to->world, to->room, to->door, to->map, to->battle, to->event);
         BeginTransition();
         g_requestTransition(to, fade, mode, flag, extra);
@@ -234,6 +234,40 @@ void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t 
     g_requestTransition(to, fade, mode, flag, extra);
 }
 
+// Spawn groups the area script created for this load: header type, id, record object IDs.
+// Party slots: 0x236 player, 0x237 friend 1, 0x238 friend 2, 0x3EE world ally.
+bool DumpSpawnGroup(int i, char* line, std::size_t cap) {
+    __try {
+        const auto entry = g_exeBase + 0x2A10010 + static_cast<std::size_t>(i) * 16;
+        const auto key = *reinterpret_cast<const std::uint32_t*>(entry);
+        const auto flags = *reinterpret_cast<const std::uint32_t*>(entry + 4);
+        const auto controller = *reinterpret_cast<const uintptr_t*>(entry + 8);
+        if (!controller) return false;
+        const auto* h = *reinterpret_cast<const std::uint8_t* const*>(controller + 8);
+        if (!h) return false;
+        const unsigned records = *reinterpret_cast<const std::uint16_t*>(h + 4);
+        int n = std::snprintf(line, cap, "[spawngroup] %d key=%c%c%c%c flags=%X type=%u hflags=%02X id=%u records=%u extra=%u ids=",
+            i, (key & 0xFF) ? char(key & 0xFF) : '.', (key >> 8 & 0xFF) ? char(key >> 8 & 0xFF) : '.',
+            (key >> 16 & 0xFF) ? char(key >> 16 & 0xFF) : '.', (key >> 24) ? char(key >> 24) : '.', flags, h[0], h[1],
+            *reinterpret_cast<const std::uint16_t*>(h + 2), records, *reinterpret_cast<const std::uint16_t*>(h + 6));
+        for (unsigned r = 0; r < records && r < 24 && n > 0 && static_cast<std::size_t>(n) < cap - 16; ++r) {
+            const auto* rec = h + 0x2C + r * 0x40;
+            n += std::snprintf(line + n, cap - n, "%s%X", r ? "," : "", *reinterpret_cast<const std::uint32_t*>(rec));
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void DumpSpawnGroups() {
+    if (!g_log) return;
+    int count = 0;
+    __try { count = *reinterpret_cast<const std::int32_t*>(g_exeBase + 0x2A10418); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (count < 0 || count > 64) { g_log("[spawngroup] count=%d out of range", count); return; }
+    char line[512];
+    for (int i = 0; i < count; ++i) if (DumpSpawnGroup(i, line, sizeof(line))) g_log("%s", line);
+}
+
 void CompleteLoad() {
     ++g_loadSerial;
     const bool hostIssued = g_hostCause.issued && g_transitionPending && LoadCauseCurrent(g_hostCause) &&
@@ -246,6 +280,7 @@ void CompleteLoad() {
     if (g_log) g_log("[warp] load complete serial=%u transition=%u room=%02X/%02X door=%u map=%u btl=%u evt=%u",
                      g_loadSerial, g_transitionSerial, location.worldId, location.roomId,
                      location.door, location.mapProgram, location.battleProgram, location.eventProgram);
+    DumpSpawnGroups();
 }
 
 void __fastcall HookedLoadComplete(void* task) {
@@ -507,10 +542,11 @@ bool IssueEventFollow(std::uint8_t world, std::uint8_t room, std::uint16_t door,
     return true;
 }
 
+// Any event that ends here (followed or triggered locally) may make its own closing jump: blocking it
+// leaves the screen faded out and the game never free to take the host's next room.
 void EndEventFollow(unsigned graceMs) {
-    if (g_eventExitUntilMs == 0) return;
     const ULONGLONG until = GetTickCount64() + graceMs;
-    if (until < g_eventExitUntilMs) g_eventExitUntilMs = until;
+    if (g_eventExitUntilMs == 0 || until < g_eventExitUntilMs) g_eventExitUntilMs = until;
 }
 
 RoomTransition ReadLocation() {
