@@ -62,6 +62,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include "DownedSpikeState.hpp"
 #include "RevivePrompt.hpp"
@@ -69,6 +70,7 @@
 #include "DownedSpectateAdapter.hpp"
 #include "DownedSpectateChannel.hpp"
 #include "PuppetHold.hpp"
+#include "PauseTag.hpp"
 #include "SpawnPickHook.hpp"
 
 namespace kh2coop {
@@ -1178,13 +1180,54 @@ static bool IsPuppetActive(int index) {
 // Owner-thread projection only: already captured avatar values, never extra native reads.
 // warp's transition observer: game thread, inside the requesting entity update.
 namespace clonewpn { static void Reset(); }
+// g_localAvatar and the local bridge slot have two writers: the game thread (every frame) and the
+// render thread (pausetag::PausedHeartbeat, only while the game has stopped updating).
+static SRWLOCK g_localPublishLock = SRWLOCK_INIT;
+static std::atomic<ULONGLONG> g_lastGamePublishMs {0};
 static void PublishLocalForTransition() {
     ReleaseDownedSpectate(); // no spectator selection may survive even a same-room retry
     CloneGaugeClear(0); CloneGaugeClear(1); // the clone dies with the room; the HUD must not keep it
     clonewpn::Reset(); // the next clone spawns with this machine's keyblade again
     if (!g_avatarBridge.IsOpen()) return;
+    AcquireSRWLockExclusive(&g_localPublishLock);
     if (const auto flagged = g_localAvatar.OnTransition(g_frameCounter)) g_avatarBridge.PublishLocal(*flagged);
+    ReleaseSRWLockExclusive(&g_localPublishLock);
 }
+
+// This game is paused: a menu is open in a live room, outside events.
+static bool LocalPaused() {
+    return *reinterpret_cast<const std::uint8_t*>(g_exeBase + offsets::OPEN_MENU) != 0xFF &&
+           *reinterpret_cast<const std::uint8_t*>(g_exeBase + offsets::IN_FIELD) != 0 &&
+           *reinterpret_cast<const std::int32_t*>(g_exeBase + offsets::CUTSCENE_STATE) == 0 &&
+           *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::EVENT_CONTEXT) == 0;
+}
+
+namespace pausetag {
+void PausedHeartbeat() {
+    if (!g_avatarBridge.IsOpen() || g_exeBase == 0) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_lastGamePublishMs.load(std::memory_order_relaxed) < 150) return; // game thread is publishing
+    static ULONGLONG lastBeat = 0; // render thread only
+    if (now - lastBeat < 50) return;
+    lastBeat = now;
+    std::uint8_t world = 0, room = 0;
+    __try {
+        if (!LocalPaused()) return;
+        world = *reinterpret_cast<const std::uint8_t*>(g_exeBase + offsets::WORLD_ID);
+        room = *reinterpret_cast<const std::uint8_t*>(g_exeBase + offsets::ROOM_ID);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_localPublishLock);
+    // Only the pose this room's last update published (never a stale one from an earlier room).
+    if (const auto paused = g_localAvatar.PausedRepeat(); paused && paused->worldId == world && paused->roomId == room) {
+        g_avatarBridge.PublishLocal(*paused);
+        static bool logged = false;
+        if (!logged) { logged = true; Log("[pausetag] paused: repeating the last pose for peers"); }
+    }
+    ReleaseSRWLockExclusive(&g_localPublishLock);
+}
+} // namespace pausetag
 
 static void PublishCoopHud(const AvatarState& local, const PuppetAuthority& before) {
     hud::Input input;
@@ -4272,6 +4315,79 @@ static void ApplyPuppetTransform(void* actorObj, int index) {
     *reinterpret_cast<uint32_t*>(actor + ACTOR_PLACED_FLAGS) |= ACTOR_PLACED_THIS_FRAME;
 }
 
+// ---- Pause label anchor (receiver, game thread) -----------------------------------------------
+// The game's camera matrices (GetView 0x19CE40 / GetProjection 0x19CFC0, double-buffered by the
+// index at 0xAC1838): view at 0xAC1028 + i*0x80, projection at 0xAC1840 + i*0x184, row vectors.
+// world * view * projection, divided by w, lands in PS2 GS coordinates (0x3B7150 does the same).
+// The projection record also holds the screen centre (+0x58/+0x5C) and the visible half extent
+// (+0x7C/+0x80, 256 + widescreen extra by 208).
+constexpr uintptr_t RVA_CAMERA_INDEX = 0xAC1838, RVA_VIEW = 0xAC1028, RVA_PROJECTION = 0xAC1840;
+
+static bool ProjectToGs(const float p[3], float& x, float& y, float& w) {
+    const int i = *reinterpret_cast<const int*>(g_exeBase + RVA_CAMERA_INDEX);
+    if (i < 0 || i > 1) return false;
+    const float* view = reinterpret_cast<const float*>(g_exeBase + RVA_VIEW + static_cast<uintptr_t>(i) * 0x80);
+    const float* proj = reinterpret_cast<const float*>(g_exeBase + RVA_PROJECTION + static_cast<uintptr_t>(i) * 0x184);
+    const float v[4] = {p[0], p[1], p[2], 1.0f};
+    float t[4], c[4];
+    for (int k = 0; k < 4; ++k) t[k] = v[0] * view[k] + v[1] * view[4 + k] + v[2] * view[8 + k] + v[3] * view[12 + k];
+    for (int k = 0; k < 4; ++k) c[k] = t[0] * proj[k] + t[1] * proj[4 + k] + t[2] * proj[8 + k] + t[3] * proj[12 + k];
+    if (!std::isfinite(c[3]) || std::fabs(c[3]) < 1e-4f) return false;
+    x = c[0] / c[3]; y = c[1] / c[3]; w = c[3];
+    return std::isfinite(x) && std::isfinite(y);
+}
+
+static void UpdatePauseTag(uintptr_t actor, int index) {
+    __try {
+        const auto& pose = g_puppets[index].pose.pose;
+        if (!(pose.flags & AvatarPaused) || (pose.flags & AvatarInCutscene) || g_soraActor == 0) {
+            pausetag::Set(index, false);
+            return;
+        }
+        static const float height = [] {
+            char v[16] {};
+            const DWORD n = GetEnvironmentVariableA("KH2COOP_TAG_HEIGHT", v, sizeof(v));
+            const float h = n > 0 && n < sizeof(v) ? static_cast<float>(std::atof(v)) : 0.0f;
+            return h > 0.0f && h < 1000.0f ? h : 190.0f;
+        }();
+        const uintptr_t entity = actor + offsets::actor::ENTITY_TRANSFORM;
+        const float head[3] = {*reinterpret_cast<float*>(entity + offsets::entity::POS_X),
+                               *reinterpret_cast<float*>(entity + offsets::entity::POS_Y) - height, // -Y is up
+                               *reinterpret_cast<float*>(entity + offsets::entity::POS_Z)};
+        // The local player is always in front of the camera: its w gives the "in front" sign.
+        const uintptr_t self = g_soraActor + offsets::actor::ENTITY_TRANSFORM;
+        const float selfPos[3] = {*reinterpret_cast<float*>(self + offsets::entity::POS_X),
+                                  *reinterpret_cast<float*>(self + offsets::entity::POS_Y) - height,
+                                  *reinterpret_cast<float*>(self + offsets::entity::POS_Z)};
+        float x = 0, y = 0, w = 0, sx = 0, sy = 0, sw = 0;
+        if (!ProjectToGs(head, x, y, w) || !ProjectToGs(selfPos, sx, sy, sw) || (w > 0) != (sw > 0)) {
+            pausetag::Set(index, false);
+            return;
+        }
+        const int ci = *reinterpret_cast<const int*>(g_exeBase + RVA_CAMERA_INDEX);
+        const uintptr_t record = g_exeBase + RVA_PROJECTION + static_cast<uintptr_t>(ci) * 0x184;
+        float cx = *reinterpret_cast<const float*>(record + 0x58), cy = *reinterpret_cast<const float*>(record + 0x5C);
+        float hw = *reinterpret_cast<const float*>(record + 0x7C), hh = *reinterpret_cast<const float*>(record + 0x80);
+        if (!(cx > 1000.0f && cx < 3000.0f)) cx = 2048.0f;
+        if (!(cy > 1000.0f && cy < 3000.0f)) cy = 2048.0f;
+        if (!(hw > 100.0f && hw < 1500.0f)) hw = 256.0f;
+        if (!(hh > 100.0f && hh < 1500.0f)) hh = 208.0f;
+        const float nx = (x - (cx - hw)) / (2.0f * hw), ny = (y - (cy - hh)) / (2.0f * hh);
+        const bool onScreen = nx > -0.05f && nx < 1.05f && ny > -0.05f && ny < 1.1f;
+        pausetag::Set(index, onScreen, nx, ny);
+        // Calibration evidence (bounded): the first projection, then every ~5 s for a while.
+        static unsigned logged = 0;
+        static uint32_t lastLogFrame = 0;
+        if (logged < 12 && (logged == 0 || g_frameCounter - lastLogFrame >= 300)) {
+            ++logged; lastLogFrame = g_frameCounter;
+            Log("[pausetag] slot %d gs=(%.1f,%.1f) w=%.2f self=(%.1f,%.1f) w=%.2f centre=(%.1f,%.1f) half=(%.1f,%.1f) n=(%.3f,%.3f) shown=%d",
+                index, x, y, w, sx, sy, sw, cx, cy, hw, hh, nx, ny, onScreen ? 1 : 0);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        pausetag::Set(index, false);
+    }
+}
+
 static void __fastcall HookedFriendAI(void* typeHandler, void* actorObj) {
     const int puppet = PuppetIndexFor(reinterpret_cast<uintptr_t>(actorObj));
     if (puppet >= 0) {
@@ -4678,6 +4794,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
 
             if (addr == listHead && listHead != 0) {
                 ++g_frameCounter;
+                pausetag::Tick(g_frameCounter);
                 lifetimetrace::Drain(&Log);
                 privatestatus::Drain(&Log); // Only actual registered owner drains.
                 if (g_inputTraceBase.load(std::memory_order_acquire)) {
@@ -4827,9 +4944,13 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             // VUH-1513: only with a kit requested does the roster byte report the
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit
+            if (LocalPaused()) avatar.flags |= AvatarPaused;
             // VUH-1787: an own room load stops this stream; flag it so peers hide, not hold.
+            AcquireSRWLockExclusive(&g_localPublishLock);
             avatar = g_localAvatar.Captured(avatar, warp::LoadPending());
             g_avatarBridge.PublishLocal(avatar);
+            ReleaseSRWLockExclusive(&g_localPublishLock);
+            g_lastGamePublishMs.store(GetTickCount64(), std::memory_order_relaxed);
             PublishCoopHud(avatar, hudAuthority);
         }
 
@@ -4841,6 +4962,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
                 DrivePuppetMotion(actorObj, puppet);
             }
             ApplyPuppetTransform(actorObj, puppet);
+            UpdatePauseTag(reinterpret_cast<uintptr_t>(actorObj), puppet);
         } else if (savedFriendSlot != 0) {
             // Re-inject movement input after physics overwrites.
             // The motion controller tick (FUN_1403c6740) has already run

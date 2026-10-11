@@ -144,6 +144,7 @@ enum AvatarFlags : std::uint8_t {
     AvatarDowned = 1 << 1,
     AvatarInCutscene = 1 << 2, // owner can't be shown (event, load)
     AvatarHeld = 1 << 3,       // receiver-local (VUH-1787): stream stalled, newest pose held; stripped on admission
+    AvatarPaused = 1 << 4,     // owner's game is paused (a menu is open); peers label the clone
 };
 
 struct AvatarState {

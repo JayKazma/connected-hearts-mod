@@ -24,6 +24,7 @@
 #include "kh2coop/CaptureChannel.hpp"
 #include "CoopHudMailbox.hpp"
 #include "PartnerCard.hpp"
+#include "PauseTag.hpp"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -34,6 +35,8 @@
 
 #include "MinHook.h"
 
+#include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -167,6 +170,14 @@ ID3D12Resource* g_overlayTexture = nullptr;
 UINT g_overlayTextureW = 0, g_overlayTextureH = 0;
 D3D12_RESOURCE_STATES g_overlayTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
 bool g_blendFailed = false;
+// "Paused" tag over a clone (PauseTag.hpp): one small texture, SRV slot 1, drawn once per tag.
+ID3D12Resource* g_tagTexture = nullptr;
+ID3D12Resource* g_tagUpload = nullptr; // persistently mapped; copied into g_tagTexture once
+UINT g_tagW = 0, g_tagH = 0;
+float g_tagScale = 0.0f;
+bool g_tagNeedsCopy = false;
+D3D12_RESOURCE_STATES g_tagTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
+std::vector<ID3D12Resource*> g_tagRetired; // replaced on a resize; may still be in flight, freed at teardown
 UINT64 g_overlayLastRefresh = 0;
 bool g_overlayValid = false;
 hud::Mailbox g_hudMailbox; // Process lifetime, never recreated under a callback.
@@ -860,11 +871,11 @@ bool EnsureBlendPipeline(DXGI_FORMAT rtvFormat) {
     }
     if (!g_srvHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC heap {};
-        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = 1;
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = 2; // overlay, tag
         heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         HRESULT hr = g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g_srvHeap));
         if (FAILED(hr)) return BlendFail("CreateDescriptorHeap(srv)", hr);
-        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; heap.NumDescriptors = 1;
         hr = g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g_rtvHeap));
         if (FAILED(hr)) return BlendFail("CreateDescriptorHeap(rtv)", hr);
     }
@@ -929,6 +940,45 @@ bool EnsureOverlayTexture(UINT width, UINT height) {
     return true;
 }
 
+// The tag bitmap for this backbuffer height, in its own texture (SRV slot 1).
+bool EnsureTagTexture(UINT backbufferHeight) {
+    const float scale = std::clamp(static_cast<float>(backbufferHeight) / 720.0f, 0.5f, 4.0f);
+    if (g_tagTexture && g_tagScale == scale) return true;
+    std::vector<std::uint8_t> pixels;
+    UINT w = 0, h = 0;
+    if (!partnercard::DrawTag(L"Paused", scale, w, h, pixels)) return false;
+    if (g_tagTexture) { g_tagRetired.push_back(g_tagTexture); g_tagTexture = nullptr; }
+    if (g_tagUpload) { g_tagRetired.push_back(g_tagUpload); g_tagUpload = nullptr; }
+    const UINT pitch = AlignPitch(w * 4);
+    g_tagUpload = CreateBuffer(D3D12_HEAP_TYPE_UPLOAD, static_cast<UINT64>(pitch) * h, D3D12_RESOURCE_STATE_GENERIC_READ);
+    std::uint8_t* mapped = nullptr;
+    D3D12_RANGE none {0, 0};
+    if (!g_tagUpload || FAILED(g_tagUpload->Map(0, &none, reinterpret_cast<void**>(&mapped)))) return BlendFail("tag upload", E_FAIL);
+    for (UINT y = 0; y < h; ++y) std::memcpy(mapped + static_cast<size_t>(y) * pitch, pixels.data() + static_cast<size_t>(y) * w * 4, w * 4);
+    D3D12_RANGE written {0, static_cast<SIZE_T>(pitch) * h};
+    g_tagUpload->Unmap(0, &written);
+    D3D12_HEAP_PROPERTIES heap {}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = w; desc.Height = h; desc.DepthOrArraySize = 1; desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+    const HRESULT hr = g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_tagTexture));
+    if (FAILED(hr)) return BlendFail("CreateCommittedResource(tag)", hr);
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv {};
+    srv.Format = desc.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE slot = g_srvHeap->GetCPUDescriptorHandleForHeapStart();
+    slot.ptr += g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    g_device->CreateShaderResourceView(g_tagTexture, &srv, slot);
+    g_tagW = w; g_tagH = h; g_tagScale = scale;
+    g_tagTextureState = D3D12_RESOURCE_STATE_COPY_DEST;
+    g_tagNeedsCopy = true;
+    if (g_log) g_log("[pausetag] label texture %ux%u scale=%.2f", w, h, scale);
+    return true;
+}
+
 // sRGB backbuffers blend in linear space; the view format must match the swapchain's.
 DXGI_FORMAT RtvFormatFor(DXGI_FORMAT backbuffer) {
     switch (backbuffer) {
@@ -940,6 +990,11 @@ DXGI_FORMAT RtvFormatFor(DXGI_FORMAT backbuffer) {
 
 void ReleaseBlend() {
     if (g_overlayTexture) { g_overlayTexture->Release(); g_overlayTexture = nullptr; }
+    if (g_tagTexture) { g_tagTexture->Release(); g_tagTexture = nullptr; }
+    if (g_tagUpload) { g_tagUpload->Release(); g_tagUpload = nullptr; }
+    for (auto* r : g_tagRetired) r->Release();
+    g_tagRetired.clear();
+    g_tagW = g_tagH = 0; g_tagScale = 0.0f;
     if (g_blendPso) { g_blendPso->Release(); g_blendPso = nullptr; }
     if (g_blendRoot) { g_blendRoot->Release(); g_blendRoot = nullptr; }
     if (g_srvHeap) { g_srvHeap->Release(); g_srvHeap = nullptr; }
@@ -959,7 +1014,7 @@ void Transition(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
 }
 
 // Records and submits this present's work: overlay and/or capture copy.
-void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
+void SubmitFrameWork(bool drawOverlay, bool captureFrame, int tagCount, const pausetag::Visible* tags) {
     if (g_gpuFailed) {
         if (captureFrame) FailJob(CaptureStatus::GpuError, L"renderer GPU work failed; restart required");
         return;
@@ -1047,6 +1102,9 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
     drawOverlay = drawOverlay && g_overlayHasContent &&
                   EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) &&
                   EnsureOverlayTexture(g_overlayLayout.width, g_overlayLayout.height);
+    const bool drawTags = tagCount > 0 && !g_blendFailed && bbDesc.Width >= 64 && bbDesc.Height >= 64 &&
+                          EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) && EnsureTagTexture(bbDesc.Height);
+    if (!drawOverlay && !drawTags && !captureFrame) { backbuffer->Release(); return; }
 
     if (captureFrame) {
         UINT64 total = 0;
@@ -1072,7 +1130,7 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
 
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_PRESENT;
     if (drawOverlay) {
-        // Upload the overlay pixels into the texture, then blend one quad at the screen's top-left.
+        // Upload the overlay pixels into the texture (drawn at the screen's top-left below).
         const UINT ow = g_overlayLayout.width, oh = g_overlayLayout.height;
         const UINT pitch = AlignPitch(ow * 4);
         for (UINT y = 0; y < oh; ++y) {
@@ -1099,7 +1157,26 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
         ctx.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         Transition(ctx.list, g_overlayTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         g_overlayTextureState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-
+    }
+    if (drawTags && g_tagNeedsCopy) {
+        // The tag bitmap is static: copied into its texture once per (re)creation.
+        D3D12_TEXTURE_COPY_LOCATION dst {};
+        dst.pResource = g_tagTexture;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src {};
+        src.pResource = g_tagUpload;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width = g_tagW;
+        src.PlacedFootprint.Footprint.Height = g_tagH;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = AlignPitch(g_tagW * 4);
+        ctx.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        Transition(ctx.list, g_tagTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        g_tagTextureState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        g_tagNeedsCopy = false;
+    }
+    if (drawOverlay || drawTags) {
         Transition(ctx.list, backbuffer, state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         D3D12_RENDER_TARGET_VIEW_DESC rtv {};
@@ -1116,14 +1193,35 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame) {
         ctx.list->SetGraphicsRootSignature(g_blendRoot);
         ID3D12DescriptorHeap* heaps[] = {g_srvHeap};
         ctx.list->SetDescriptorHeaps(1, heaps);
-        ctx.list->SetGraphicsRootDescriptorTable(1, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
-        const float rect[4] = {-1.0f, 1.0f, 2.0f * static_cast<float>(ow) / static_cast<float>(bbDesc.Width),
-                               2.0f * static_cast<float>(oh) / static_cast<float>(bbDesc.Height)};
-        ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
         ctx.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        ctx.list->DrawInstanced(4, 1, 0, 0);
-        static bool drawLogged = false;
-        if (!drawLogged && g_log) { drawLogged = true; g_log("[hud] first overlay draw %ux%u scale=%.2f on %llux%u", ow, oh, g_overlayLayout.scale, static_cast<unsigned long long>(bbDesc.Width), bbDesc.Height); }
+        const float bw = static_cast<float>(bbDesc.Width), bh = static_cast<float>(bbDesc.Height);
+        if (drawOverlay) {
+            const UINT ow = g_overlayLayout.width, oh = g_overlayLayout.height;
+            ctx.list->SetGraphicsRootDescriptorTable(1, g_srvHeap->GetGPUDescriptorHandleForHeapStart());
+            const float rect[4] = {-1.0f, 1.0f, 2.0f * static_cast<float>(ow) / bw, 2.0f * static_cast<float>(oh) / bh};
+            ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
+            ctx.list->DrawInstanced(4, 1, 0, 0);
+            static bool drawLogged = false;
+            if (!drawLogged && g_log) { drawLogged = true; g_log("[hud] first overlay draw %ux%u scale=%.2f on %llux%u", ow, oh, g_overlayLayout.scale, static_cast<unsigned long long>(bbDesc.Width), bbDesc.Height); }
+        }
+        if (drawTags) {
+            D3D12_GPU_DESCRIPTOR_HANDLE tagSrv = g_srvHeap->GetGPUDescriptorHandleForHeapStart();
+            tagSrv.ptr += g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            ctx.list->SetGraphicsRootDescriptorTable(1, tagSrv);
+            const float tw = static_cast<float>(g_tagW), th = static_cast<float>(g_tagH);
+            for (int t = 0; t < tagCount; ++t) {
+                // Bottom-centre at the projected head, kept inside the screen.
+                float left = std::floor(tags[t].nx * bw - tw / 2.0f);
+                float top = std::floor(tags[t].ny * bh - th);
+                left = std::clamp(left, 0.0f, std::max(0.0f, bw - tw));
+                top = std::clamp(top, 0.0f, std::max(0.0f, bh - th));
+                const float rect[4] = {left / bw * 2.0f - 1.0f, 1.0f - top / bh * 2.0f, 2.0f * tw / bw, 2.0f * th / bh};
+                ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
+                ctx.list->DrawInstanced(4, 1, 0, 0);
+            }
+            static bool tagLogged = false;
+            if (!tagLogged && g_log) { tagLogged = true; g_log("[pausetag] first label draw at (%.3f,%.3f) on %llux%u", tags[0].nx, tags[0].ny, static_cast<unsigned long long>(bbDesc.Width), bbDesc.Height); }
+        }
     }
 
     if (captureFrame) {
@@ -1177,6 +1275,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
     const bool ready = PrepareSwapChain(swapChain);
     StartJobIfRequested();
     PollCoopHud();
+    pausetag::PausedHeartbeat(); // this game paused: keep its pose flowing to peers
 
     if (g_gpuFailed) FailJob(CaptureStatus::GpuError, L"renderer GPU work failed; restart required");
     if (ready && !g_gpuFailed) {
@@ -1190,7 +1289,9 @@ void OnPresent(IDXGISwapChain* swapChain) {
         // KH2COOP_PARTNER_CARD=1 turns it on.
         static const bool cardEnabled = [] { char v[2] {}; return GetEnvironmentVariableA("KH2COOP_PARTNER_CARD", v, 2) == 1 && v[0] == '1'; }();
         const bool drawOverlay = g_channel->overlay != 0 || (cardEnabled && partnercard::HasContent(g_renderHud));
-        if (drawOverlay || captureFrame) SubmitFrameWork(drawOverlay, captureFrame);
+        pausetag::Visible tags[pausetag::kSlots];
+        const int tagCount = pausetag::Collect(tags);
+        if (drawOverlay || captureFrame || tagCount > 0) SubmitFrameWork(drawOverlay, captureFrame, tagCount, tags);
     }
 
     if (g_job.active) {

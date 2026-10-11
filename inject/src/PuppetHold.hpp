@@ -40,6 +40,14 @@ public:
         last_.seq = frame;
         return last_;
     }
+    // The game stopped updating while paused: the last pose again, marked AvatarPaused, so peers
+    // keep the clone live and label it. Nothing when nothing was published or it was hidden.
+    std::optional<AvatarState> PausedRepeat() const {
+        if (!have_ || (last_.flags & AvatarInCutscene)) return std::nullopt;
+        AvatarState a = last_;
+        a.flags = static_cast<std::uint8_t>(a.flags | AvatarPaused);
+        return a;
+    }
     void Reset() { have_ = false; last_ = {}; }
 
 private:

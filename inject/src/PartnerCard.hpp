@@ -28,4 +28,9 @@ bool HasContent(const hud::Snapshot& snapshot) noexcept;
 
 const wchar_t* WorldName(std::uint16_t world) noexcept;
 
+// A small pill label (the "Paused" tag over a clone), at `scale` (backbuffer height / 720).
+// Fills width/height and `bgraPremultiplied`. Returns false when GDI+ is unavailable.
+bool DrawTag(const wchar_t* text, float scale, unsigned& width, unsigned& height,
+             std::vector<std::uint8_t>& bgraPremultiplied);
+
 } // namespace kh2coop::inject::partnercard

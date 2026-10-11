@@ -288,4 +288,48 @@ bool Draw(const Layout& layout, const hud::Snapshot& snapshot, const wchar_t* de
     return true;
 }
 
+bool DrawTag(const wchar_t* text, float scale, unsigned& width, unsigned& height,
+             std::vector<std::uint8_t>& out) {
+    if (!EnsureGdiplus()) return false;
+    const float s = std::clamp(scale, 0.5f, 4.0f);
+    Font font(L"Segoe UI", 15 * s, FontStyleBold, UnitPixel);
+    StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
+    fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    RectF measured;
+    {
+        Bitmap probe(1, 1, PixelFormat32bppPARGB);
+        Graphics pg(&probe);
+        pg.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        pg.MeasureString(text, -1, &font, PointF(0, 0), &fmt, &measured);
+    }
+    const float padX = 12 * s, padY = 4 * s, border = 2 * s;
+    width = static_cast<unsigned>(measured.Width + 2 * padX + 2 * border + 0.5f);
+    height = static_cast<unsigned>(measured.Height + 2 * padY + 2 * border + 0.5f);
+    width = std::clamp(width, 16u, 1024u); height = std::clamp(height, 8u, 256u);
+    Bitmap bitmap(static_cast<INT>(width), static_cast<INT>(height), PixelFormat32bppPARGB);
+    Graphics g(&bitmap);
+    g.Clear(Color(0, 0, 0, 0));
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    RectF body(border / 2, border / 2, static_cast<float>(width) - border, static_cast<float>(height) - border);
+    SolidBrush fill(C(200, 8, 12, 24));
+    FillPill(g, body, body.Height / 2, fill);
+    Pen edge(C(230, 255, 209, 102), border);
+    StrokePill(g, body, body.Height / 2, edge);
+    ShadowText(g, text, font, RectF(0, 0, static_cast<float>(width), static_cast<float>(height)), fmt,
+               C(255, 255, 255, 255), s * 0.5f);
+
+    BitmapData data {};
+    Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
+    if (bitmap.LockBits(&rect, ImageLockModeRead, PixelFormat32bppPARGB, &data) != Ok) return false;
+    out.resize(static_cast<std::size_t>(width) * height * 4);
+    for (unsigned row = 0; row < height; ++row)
+        std::memcpy(out.data() + static_cast<std::size_t>(row) * width * 4,
+                    static_cast<const std::uint8_t*>(data.Scan0) + static_cast<std::size_t>(row) * data.Stride,
+                    static_cast<std::size_t>(width) * 4);
+    bitmap.UnlockBits(&data);
+    return true;
+}
+
 } // namespace kh2coop::inject::partnercard
