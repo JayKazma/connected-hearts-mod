@@ -2453,6 +2453,43 @@ static uint64_t __fastcall HookedTrigger(int a, int b) {
     return r;
 }
 
+// Missions (the mail delivery, the minigames): the room's area script sets up the mission object;
+// talking to its NPC ends in 0x3A3140, which starts it (intro scene, timer, counters). Shared as a
+// trigger with this sentinel; a game whose mission already started in this room is left alone.
+static constexpr int32_t kMissionStart = 0x7FFF0001;
+static constexpr uintptr_t RVA_MISSION_START = 0x3A3140, RVA_MISSION = 0x2A0FF68;
+static constexpr uint8_t kMissionStartBytes[] = {0x48, 0x8B, 0x0D, 0x21, 0xCE, 0x66, 0x02, 0x48, 0x85, 0xC9, 0x0F, 0x85};
+using MissionStartFn = void(__fastcall*)();
+static MissionStartFn g_origMissionStart = nullptr;
+static uint32_t g_missionStartedLoad = UINT32_MAX;
+
+static void __fastcall HookedMissionStart() {
+    uintptr_t mission = 0;
+    __try { mission = Read<uintptr_t>(RVA_MISSION); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    g_origMissionStart();
+    if (!mission) return;
+    g_missionStartedLoad = warp::LoadSerial();
+    if (g_replayingTrigger) return;
+    __try {
+        ++g_trigSeq; g_trigA = kMissionStart; g_trigB = 0; g_trigLoc = ReadLoc();
+        Log("[cutscene] mission started at %02X/%02X evt %u; telling the other player (trigger %u)", g_trigLoc.world, g_trigLoc.room, g_trigLoc.evt, g_trigSeq);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static bool ApplyPeerMission(ULONGLONG now) {
+    if (g_missionStartedLoad == warp::LoadSerial()) { Log("[cutscene] the other player's mission %u: already started here", g_peer.trigSeq); return true; }
+    uintptr_t mission = 0;
+    __try { mission = Read<uintptr_t>(RVA_MISSION); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (!mission) { Log("[cutscene] the other player's mission %u: no mission set up in this room here", g_peer.trigSeq); return true; }
+    if (g_active) return false;
+    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's mission %u not started (this game was not free within 5 s)", g_peer.trigSeq), true) : false;
+    g_replayingTrigger = true;
+    __try { g_origMissionStart(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[cutscene] mission start faulted"); }
+    g_replayingTrigger = false;
+    Log("[cutscene] started the other player's mission %u here", g_peer.trigSeq);
+    return true;
+}
+
 // Game thread. True once the peer's trigger is settled (fired here, or not applicable).
 static bool ApplyPeerTrigger(ULONGLONG now) {
     const EventLoc here = ReadLoc();
@@ -2461,6 +2498,7 @@ static bool ApplyPeerTrigger(ULONGLONG now) {
             g_peer.trigSeq, g_peer.trigWorld, g_peer.trigRoom, g_peer.trigEvt, here.world, here.room, here.evt);
         return true;
     }
+    if (g_peer.trigA == kMissionStart) return g_origMissionStart ? ApplyPeerMission(now) : true;
     if (g_active) return false;                                        // wait for this game's own event to end
     if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's trigger %u not fired (this game was not free within 5 s)", g_peer.trigSeq), true) : false;
     uint64_t r = 0;
@@ -2622,6 +2660,12 @@ static void Install(uintptr_t exeBase) {
     if (st == MH_OK) st = MH_EnableHook(trigger);
     if (st != MH_OK) { g_origTrigger = nullptr; Log("[cutscene] trigger hook failed (%d); mid-room events not shared", static_cast<int>(st)); return; }
     Log("[cutscene] mid-room events shared: a trigger that starts an event fires in the other game too (0x3F60D0)");
+    void* mission = reinterpret_cast<void*>(exeBase + RVA_MISSION_START);
+    if (std::memcmp(mission, kMissionStartBytes, sizeof(kMissionStartBytes)) != 0) { Log("[cutscene] mission start bytes don't match; missions not shared"); return; }
+    if (MH_CreateHook(mission, reinterpret_cast<void*>(&HookedMissionStart), reinterpret_cast<void**>(&g_origMissionStart)) != MH_OK || MH_EnableHook(mission) != MH_OK) {
+        g_origMissionStart = nullptr; Log("[cutscene] mission start hook failed; missions not shared"); return;
+    }
+    Log("[cutscene] missions shared: a mission started in one game starts in the other (0x3A3140)");
 }
 } // namespace cutscenesync
 

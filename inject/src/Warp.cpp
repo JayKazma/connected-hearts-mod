@@ -230,10 +230,30 @@ void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t 
         return;
     }
     if (enemysync::HasClientAuthority()) {
+        // Only the player walking out of a room is the host's call. A jump the game makes on its own
+        // while the player has no control (story chains: an event's room jumps straight to the next)
+        // goes through; blocking it leaves the client on a black screen retrying every frame.
+        const bool freePlay = g_channel && SafeToWarp();
+        static LocationPacket lastBlocked {};
+        static unsigned repeats = 0;
+        const bool same = std::memcmp(&lastBlocked, to, 10) == 0; // world..event, not the padding
+        repeats = same ? repeats + 1 : 0;
+        lastBlocked = *to;
+        if (!freePlay || repeats >= 30) {
+            g_eventFollowLoad = g_loadSerial;
+            if (g_log) g_log("[warp] client native exit allowed (%s) target=%02X/%02X door=%u map=%u btl=%u evt=%u",
+                             !freePlay ? "scripted, no player control" : "the game kept asking for it",
+                             to->world, to->room, to->door, to->map, to->battle, to->event);
+            repeats = 0;
+            BeginTransition();
+            g_requestTransition(to, fade, mode, flag, extra);
+            return;
+        }
         ++g_blockedNativeExits;
-        if (g_log) g_log("[warp] client native exit blocked count=%u target=%02X/%02X door=%u map=%u btl=%u evt=%u",
-                         g_blockedNativeExits, to->world, to->room, to->door, to->map,
-                         to->battle, to->event);
+        if (g_log && (g_blockedNativeExits <= 20 || g_blockedNativeExits % 100 == 0))
+            g_log("[warp] client native exit blocked count=%u target=%02X/%02X door=%u map=%u btl=%u evt=%u",
+                  g_blockedNativeExits, to->world, to->room, to->door, to->map,
+                  to->battle, to->event);
         return;
     }
     BeginTransition();
