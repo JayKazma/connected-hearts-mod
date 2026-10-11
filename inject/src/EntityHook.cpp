@@ -419,7 +419,7 @@ struct PuppetDriver {
     uint32_t poseFrame = 0;      // DLL frame of the latest new pose
     uintptr_t actor = 0;         // actor we last drove (re-resolved per frame)
     int lastAnim = -1;           // motion we last set on `actor`
-    uint32_t missingLogged = 0;  // last motion logged as missing from the clone's set
+    uint64_t missingLogged[16] {}; // motions (< 1024) already logged as missing from the clone's set
     uint32_t savedTeam = 0;      // `actor`'s team before we zeroed it
     bool teamSaved = false;
     bool savedNoCollide = false; // `actor`'s no-collision bit before we set it
@@ -2482,7 +2482,7 @@ static bool ApplyPeerMission(ULONGLONG now) {
     __try { mission = Read<uintptr_t>(RVA_MISSION); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     if (!mission) { Log("[cutscene] the other player's mission %u: no mission set up in this room here", g_peer.trigSeq); return true; }
     if (g_active) return false;
-    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's mission %u not started (this game was not free within 5 s)", g_peer.trigSeq), true) : false;
+    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's mission %u not started (this game was not free within 10 s)", g_peer.trigSeq), true) : false;
     g_replayingTrigger = true;
     __try { g_origMissionStart(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("[cutscene] mission start faulted"); }
     g_replayingTrigger = false;
@@ -2494,13 +2494,14 @@ static bool ApplyPeerMission(ULONGLONG now) {
 static bool ApplyPeerTrigger(ULONGLONG now) {
     const EventLoc here = ReadLoc();
     if (here.world != g_peer.trigWorld || here.room != g_peer.trigRoom || here.evt != g_peer.trigEvt) {
+        if (now <= g_trigDeadline) return false; // the host's room announcement may still be on its way
         Log("[cutscene] the other player's trigger %u is for %02X/%02X evt %u; this game is at %02X/%02X evt %u, not fired",
             g_peer.trigSeq, g_peer.trigWorld, g_peer.trigRoom, g_peer.trigEvt, here.world, here.room, here.evt);
         return true;
     }
     if (g_peer.trigA == kMissionStart) return g_origMissionStart ? ApplyPeerMission(now) : true;
     if (g_active) return false;                                        // wait for this game's own event to end
-    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's trigger %u not fired (this game was not free within 5 s)", g_peer.trigSeq), true) : false;
+    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's trigger %u not fired (this game was not free within 10 s)", g_peer.trigSeq), true) : false;
     uint64_t r = 0;
     g_replayingTrigger = true;
     __try { r = g_origTrigger(g_peer.trigA, g_peer.trigB); }
@@ -2618,7 +2619,7 @@ static void OnFrame() {
         } else if (g_peer.eventSeq == g_followedSeq) g_followDeadline = 0;
         // the other player's mid-room event (either player)
         if (g_origTrigger && g_peer.trigSeq != g_seenTrigSeq) {
-            if (!g_trigDeadline) g_trigDeadline = now + 5000;
+            if (!g_trigDeadline) g_trigDeadline = now + 10000; // room loads can take several seconds
             if (ApplyPeerTrigger(now)) { g_seenTrigSeq = g_peer.trigSeq; g_trigDeadline = 0; }
         }
     }
@@ -4134,7 +4135,10 @@ static void DrivePuppetMotion(void* actorObj, int index) {
         __try { idx = g_motionIndex(reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), static_cast<int>(motion)); }
         __except (EXCEPTION_EXECUTE_HANDLER) { idx = 0; }
         if (idx < 0) {
-            if (d.missingLogged != motion) { d.missingLogged = motion; Log("[puppet %d] motion %u not in the clone's set; using run/idle", index, motion); }
+            if (motion >= 1024 || !(d.missingLogged[motion >> 6] & (1ull << (motion & 63)))) {
+                if (motion < 1024) d.missingLogged[motion >> 6] |= 1ull << (motion & 63);
+                Log("[puppet %d] motion %u not in the clone's set; using run/idle", index, motion);
+            }
             const float speed2 = pose.velocity.x * pose.velocity.x + pose.velocity.z * pose.velocity.z;
             motion = speed2 > 1.0f ? ANIM_RUN : ANIM_IDLE;
         }
