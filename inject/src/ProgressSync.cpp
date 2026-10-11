@@ -1,4 +1,5 @@
 #include "ProgressSync.hpp"
+#include "SafeMemory.hpp"
 #include "EnemySync.hpp"
 #include "Warp.hpp"
 #include "kh2coop/KH2Offsets.hpp"
@@ -38,12 +39,7 @@ std::size_t g_queuedSpans = 0, g_queuedBytes = 0;
 // SEH stays in POD-only helpers to avoid MSVC /EHsc C2712. Failed reads never
 // substitute zeros for live data. None of the STL-owning callers use __try.
 bool ReadMemory(uintptr_t address, void* output, std::size_t size) {
-    __try {
-        std::memcpy(output, reinterpret_cast<const void*>(address), size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return SafeCopy(output, reinterpret_cast<const void*>(address), size);
 }
 
 bool WriteMasked(uintptr_t address, std::uint8_t value, std::uint8_t mask, std::uint32_t generation) {

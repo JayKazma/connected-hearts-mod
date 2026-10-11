@@ -79,8 +79,20 @@ add_library(kh2coop_inject SHARED
     src/NativeHitTrace.cpp
     src/DamagePolicy.cpp
     src/AllyHit.cpp
+    src/SafeMemory.cpp
     version.rc
 )
+
+# clang on MinGW: a __try around a plain load or store gets no handler unless the file is built with
+# -fasync-exceptions, so a bad pointer would crash the game instead of reaching the __except.
+# clang 18 crashes building these files with it; their guarded copies go through SafeMemory instead.
+if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(kh2coop_inject PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fasync-exceptions>)
+    set_source_files_properties(
+        src/EnemySync.cpp src/NativeOwnedEmitterInstall.cpp src/NativeSpawnController.cpp src/PartnerCard.cpp
+        src/ProgressSync.cpp src/RenderHook.cpp src/SaveGuard.cpp src/SteamBrokerNative.cpp src/Warp.cpp
+        PROPERTIES COMPILE_OPTIONS "-fno-async-exceptions")
+endif()
 
 if(MSVC)
     set_source_files_properties(

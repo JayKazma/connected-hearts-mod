@@ -12,6 +12,7 @@
 // ============================================================================
 
 #include "EnemySync.hpp"
+#include "SafeMemory.hpp"
 #include "OrdinaryEnemyBinding.hpp"
 #include "SpawnRowIdentity.hpp"
 #include "SpawnPick.hpp"
@@ -477,7 +478,7 @@ std::uint32_t g_logBudget = 400;
 template <typename T>
 T Read(uintptr_t address) {
     T value {};
-    std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(T));
+    if (!SafeCopy(&value, reinterpret_cast<const void*>(address), sizeof(T))) value = T {}; // bad address: zero
     return value;
 }
 
@@ -485,12 +486,7 @@ T Read(uintptr_t address) {
 bool CopyNative(uintptr_t address, void* destination, std::size_t size) {
     if (address <= 0x10000 || address >= 0x7FFFFFFFFFFFULL ||
         size > 0x7FFFFFFFFFFFULL - address) return false;
-    __try {
-        std::memcpy(destination, reinterpret_cast<const void*>(address), size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return SafeCopy(destination, reinterpret_cast<const void*>(address), size);
 }
 
 template <typename T>
@@ -1869,12 +1865,7 @@ void PublishHostMotion(std::uint32_t frame, const NativeCensus& census) {
 }
 
 bool CopyCodeBytes(const std::uint8_t* at, std::uint8_t* out, std::size_t n) noexcept {
-    __try {
-        std::memcpy(out, at, n);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return SafeCopy(out, at, n);
 }
 
 // VUH-1788: the one native creation call, POD only so SEH is allowed. Game thread.

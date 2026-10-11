@@ -1,4 +1,5 @@
 #include "NativeSpawnController.hpp"
+#include "SafeMemory.hpp"
 #include "NativeResourceTrace.hpp"
 #include "NativeTraceFiber.hpp"
 #include "kh2coop/NativeRecordContent.hpp"
@@ -328,12 +329,7 @@ bool ReadableRange(uintptr_t address, std::size_t size) {
 // SEH leaves contain no objects requiring C++ unwinding.
 bool CopyNative(uintptr_t address, void* out, std::size_t size) {
     if (!ReadableRange(address, size)) return false;
-    __try {
-        std::memcpy(out, reinterpret_cast<const void*>(address), size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return SafeCopy(out, reinterpret_cast<const void*>(address), size);
 }
 
 bool LookupNative(std::uint32_t id, uintptr_t& out) {
