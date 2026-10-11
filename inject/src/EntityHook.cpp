@@ -453,6 +453,8 @@ static constexpr uintptr_t ACTOR_TEAM = 0x4DC;
 // shared by every actor of that model: never touch that one.
 static constexpr uintptr_t ACTOR_COLLISION_FLAGS = 0x18C;
 static constexpr uint8_t ACTOR_NO_COLLIDE = 0x40;
+static constexpr uintptr_t ACTOR_PLACED_FLAGS = 0x9B8;
+static constexpr uint32_t ACTOR_PLACED_THIS_FRAME = 0x1000;
 // Puppet Drive/Summon restriction uses read-only native command admission.
 static bool g_anyPuppetActive = false;
 
@@ -4262,6 +4264,12 @@ static void ApplyPuppetTransform(void* actorObj, int index) {
     // VUH-1515 (default off): ... and its native collision bit (the attempt07 live configuration).
     if (!enemytarget::KeepNativeCollision(actor)) *collision |= ACTOR_NO_COLLIDE;
     else if (d.noCollideSaved && !d.savedNoCollide) *collision &= ~ACTOR_NO_COLLIDE;
+
+    // Not a body others push against. The no-collide bit only stops the clone being pushed; the
+    // local player's actor push (0x3B9090) pairs with every actor 0x3BA970 accepts, and that skips an
+    // actor whose 0x9B8 bit 12 is set (the game's own "just placed this frame" mark, set by
+    // SetPosition 0x3B6510 and cleared at the end of each physics step 0x3B89A0). Re-set every frame.
+    *reinterpret_cast<uint32_t*>(actor + ACTOR_PLACED_FLAGS) |= ACTOR_PLACED_THIS_FRAME;
 }
 
 static void __fastcall HookedFriendAI(void* typeHandler, void* actorObj) {
