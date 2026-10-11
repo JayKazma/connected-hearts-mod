@@ -79,6 +79,7 @@ void testCodec() {
     a.castSeq = 7; a.castId = 0x1F; a.castCategory = 2; a.castFlags = 0x11; a.castForm = 3;
     a.weaponItem = 0x29;
     a.eventSeq = 3; a.eventWorld = 8; a.eventRoom = 0x0C; a.eventDoor = 2; a.eventMap = 1; a.eventBtl = 4; a.eventEvt = 0x16; a.skipSeq = 5; a.eventActive = 1;
+    a.trigSeq = 7; a.trigA = 0x2A; a.trigB = -1; a.trigWorld = 2; a.trigRoom = 7; a.trigEvt = 95;
 
     const AvatarRelay sent {0x1234567800000001ULL, a};
     const auto pkt = encode(sent);
@@ -89,7 +90,7 @@ void testCodec() {
     AvatarRelay received;
     read(r, received);
     const auto& b = received.avatar;
-    check(size == 129 && pkt.size() == 132 && r.atEnd(), "v17 relay has exact 129-byte payload");
+    check(size == 143 && pkt.size() == 146 && r.atEnd(), "v18 relay has exact 143-byte payload");
     check(received.ownerConnectionId == sent.ownerConnectionId, "relay preserves full 64-bit connection identity");
     check(type == PacketType::AvatarRelay, "avatar relay packet type");
     check(b.seq == a.seq && b.serverTimeMs == a.serverTimeMs &&
@@ -109,6 +110,8 @@ void testCodec() {
     check(b.weaponItem == 0x29, "avatar weapon item round-trips");
     check(b.eventSeq == 3 && b.eventWorld == 8 && b.eventRoom == 0x0C && b.eventDoor == 2 && b.eventMap == 1 && b.eventBtl == 4 &&
           b.eventEvt == 0x16 && b.skipSeq == 5 && b.eventActive == 1, "avatar event fields round-trip");
+    check(b.trigSeq == 7 && b.trigA == 0x2A && b.trigB == -1 && b.trigWorld == 2 && b.trigRoom == 7 && b.trigEvt == 95,
+          "avatar trigger fields round-trip");
 
     const auto pong = encode(ClockPong {111, 222});
     decodePacketHeader(pong.data(), pong.size(), payload, size);
@@ -403,7 +406,7 @@ void testAvatarBridge() {
               got.pose.ownerSlot == SlotType::Friend2 && got.pose.position.x == 9.0f,
           "DLL reads puppet 1's pose");
     PuppetAuthority authority {PuppetAuthorityMode::Network, 0, 17, kRoster};
-    check(AVATAR_BRIDGE_VERSION == 7 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
+    check(AVATAR_BRIDGE_VERSION == 8 && ValidPuppetProvenance(got.provenance, 2, 1, authority),
           "bridge v5 preserves full network provenance");
     check(!dll.TryReadPuppet(1, got), "cached puppet has no new shared-memory sample");
     authority.connectionIds[2] += 0x100000000ULL;

@@ -2421,6 +2421,57 @@ static int State() { return Read<int32_t>(offsets::CUTSCENE_STATE); }
 static uintptr_t Context() { return Read<uintptr_t>(offsets::EVENT_CONTEXT); }
 static bool PeerFresh() { return g_peerValid && GetTickCount64() - g_peerNoteMs < 3000; }
 
+// Mid-room events: an event trigger (0x3F60D0, called from the trigger dispatcher 0x3AABE0) that starts
+// an event here is published; the other game fires the same trigger in the same room. A trigger
+// entry clears itself once fired, so a trigger this game already fired does nothing the second time.
+static constexpr uintptr_t RVA_TRIGGER = 0x3F60D0;
+static constexpr uint8_t kTriggerBytes[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x33, 0xDB, 0x4C, 0x8D, 0x05};
+using TriggerFn = uint64_t(__fastcall*)(int, int);
+static TriggerFn g_origTrigger = nullptr;
+static bool g_replayingTrigger = false;
+static uint16_t g_trigSeq = 0, g_seenTrigSeq = 0;
+static int32_t g_trigA = 0, g_trigB = 0;
+static EventLoc g_trigLoc {};
+static ULONGLONG g_trigDeadline = 0;
+
+static uint64_t __fastcall HookedTrigger(int a, int b) {
+    uintptr_t before = 0;
+    __try { before = Context(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    const uint64_t r = g_origTrigger(a, b);
+    if (g_replayingTrigger) return r;
+    __try {
+        const uintptr_t after = Context();
+        // Room-entry events (just after a load) are followed by loading the host's room instead.
+        const bool afterLoad = warp::LoadSerial() != g_lastLoadSerial || GetTickCount64() - g_lastLoadMs < 3000;
+        if (after != 0 && after != before && !afterLoad) {
+            ++g_trigSeq; g_trigA = a; g_trigB = b; g_trigLoc = ReadLoc();
+            Log("[cutscene] trigger %d/%d started an event at %02X/%02X evt %u; telling the other player (trigger %u)",
+                a, b, g_trigLoc.world, g_trigLoc.room, g_trigLoc.evt, g_trigSeq);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return r;
+}
+
+// Game thread. True once the peer's trigger is settled (fired here, or not applicable).
+static bool ApplyPeerTrigger(ULONGLONG now) {
+    const EventLoc here = ReadLoc();
+    if (here.world != g_peer.trigWorld || here.room != g_peer.trigRoom || here.evt != g_peer.trigEvt) {
+        Log("[cutscene] the other player's trigger %u is for %02X/%02X evt %u; this game is at %02X/%02X evt %u, not fired",
+            g_peer.trigSeq, g_peer.trigWorld, g_peer.trigRoom, g_peer.trigEvt, here.world, here.room, here.evt);
+        return true;
+    }
+    if (g_active) return false;                                        // wait for this game's own event to end
+    if (!warp::SafeGameplayForEventFollow()) return now > g_trigDeadline ? (Log("[cutscene] the other player's trigger %u not fired (this game was not free within 5 s)", g_peer.trigSeq), true) : false;
+    uint64_t r = 0;
+    g_replayingTrigger = true;
+    __try { r = g_origTrigger(g_peer.trigA, g_peer.trigB); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_replayingTrigger = false; Log("[cutscene] the other player's trigger %u faulted", g_peer.trigSeq); return true; }
+    g_replayingTrigger = false;
+    Log("[cutscene] fired the other player's trigger %u (%d/%d): %s", g_peer.trigSeq, g_peer.trigA, g_peer.trigB,
+        Context() != 0 ? "the event started here" : (r ? "no event here" : "already used here"));
+    return true;
+}
+
 // Game thread, once per frame (entity list head).
 static void Observe() {
     __try {
@@ -2461,6 +2512,8 @@ static void Stamp(AvatarState& a) {
     a.eventDoor = g_eventLoc.door; a.eventMap = g_eventLoc.map; a.eventBtl = g_eventLoc.btl; a.eventEvt = g_eventLoc.evt;
     a.skipSeq = g_skipSeq;
     a.eventActive = g_active ? 1 : 0;
+    a.trigSeq = g_trigSeq; a.trigA = g_trigA; a.trigB = g_trigB;
+    a.trigWorld = g_trigLoc.world; a.trigRoom = g_trigLoc.room; a.trigEvt = g_trigLoc.evt;
 }
 
 static void NotePeer(int i, const PuppetPose& p) {
@@ -2473,6 +2526,7 @@ static void NotePeer(int i, const PuppetPose& p) {
         g_peerSeen = true;
         g_followedSeq = g_peer.eventSeq;
         g_seenSkipSeq = g_peer.skipSeq;
+        g_seenTrigSeq = g_peer.trigSeq;
     }
 }
 
@@ -2523,6 +2577,11 @@ static void OnFrame() {
                 g_followedSeq = g_peer.eventSeq; g_followDeadline = 0;
             }
         } else if (g_peer.eventSeq == g_followedSeq) g_followDeadline = 0;
+        // the other player's mid-room event (either player)
+        if (g_origTrigger && g_peer.trigSeq != g_seenTrigSeq) {
+            if (!g_trigDeadline) g_trigDeadline = now + 5000;
+            if (ApplyPeerTrigger(now)) { g_seenTrigSeq = g_peer.trigSeq; g_trigDeadline = 0; }
+        }
     }
     // barrier
     const bool peerStill = PeerFresh() && g_peer.eventActive;
@@ -2556,6 +2615,12 @@ static void Install(uintptr_t exeBase) {
         }
     g_enabled = true;
     Log("[cutscene] sync ready: follow the host's room-entry events, either player's skip skips both, wait for each other at the end");
+    void* trigger = reinterpret_cast<void*>(exeBase + RVA_TRIGGER);
+    if (std::memcmp(trigger, kTriggerBytes, sizeof(kTriggerBytes)) != 0) { Log("[cutscene] trigger bytes don't match; mid-room events not shared"); return; }
+    MH_STATUS st = MH_CreateHook(trigger, reinterpret_cast<void*>(&HookedTrigger), reinterpret_cast<void**>(&g_origTrigger));
+    if (st == MH_OK) st = MH_EnableHook(trigger);
+    if (st != MH_OK) { g_origTrigger = nullptr; Log("[cutscene] trigger hook failed (%d); mid-room events not shared", static_cast<int>(st)); return; }
+    Log("[cutscene] mid-room events shared: a trigger that starts an event fires in the other game too (0x3F60D0)");
 }
 } // namespace cutscenesync
 

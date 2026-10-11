@@ -45,7 +45,7 @@ static_assert(std::is_trivially_copyable_v<AvatarState>,
 
 static constexpr const char* AVATAR_BRIDGE_PREFIX = "Local\\kh2coop_avatar_";
 static constexpr std::uint32_t AVATAR_BRIDGE_MAGIC = 0x42564B32; // "2KVB"
-static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 7; // v7: PuppetPose carries the owner's newest unfiltered state (cutscene sync); v6 weapon item, v5 field command
+static constexpr std::uint32_t AVATAR_BRIDGE_VERSION = 8; // v8: AvatarState carries event triggers (mid-room events); v7: PuppetPose carries the owner's newest unfiltered state (cutscene sync); v6 weapon item, v5 field command
 static constexpr int AVATAR_BRIDGE_PUPPETS = 2; // friend slots 1 and 2
 
 // A pose the DLL should apply to a friend-slot puppet.

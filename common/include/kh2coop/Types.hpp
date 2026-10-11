@@ -194,6 +194,15 @@ struct AvatarState {
     std::uint16_t eventEvt {0};
     std::uint16_t skipSeq {0};
     std::uint8_t eventActive {0};
+    // v18: mid-room events. trigSeq changes each time an event trigger fires in the owner's game
+    // (talking to someone, walking into a story spot); trigA/trigB are the trigger's arguments and
+    // trigWorld..trigEvt the location it fired in, so the other game can fire the same trigger.
+    std::uint16_t trigSeq {0};
+    std::int32_t trigA {0};
+    std::int32_t trigB {0};
+    std::uint8_t trigWorld {0};
+    std::uint8_t trigRoom {0};
+    std::uint16_t trigEvt {0};
 };
 
 struct InputButtons {

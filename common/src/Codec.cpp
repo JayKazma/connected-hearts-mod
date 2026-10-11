@@ -698,6 +698,12 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU16(a.eventEvt);
     w.writeU16(a.skipSeq);
     w.writeU8(a.eventActive);
+    w.writeU16(a.trigSeq);
+    w.writeU32(static_cast<std::uint32_t>(a.trigA));
+    w.writeU32(static_cast<std::uint32_t>(a.trigB));
+    w.writeU8(a.trigWorld);
+    w.writeU8(a.trigRoom);
+    w.writeU16(a.trigEvt);
 }
 
 void write(ByteWriter& w, const ClockPing& p) { w.writeU64(p.clientSendMs); }
@@ -1126,6 +1132,12 @@ void read(ByteReader& r, AvatarState& a) {
     a.eventEvt = r.readU16();
     a.skipSeq = r.readU16();
     a.eventActive = r.readU8();
+    a.trigSeq = r.readU16();
+    a.trigA = static_cast<std::int32_t>(r.readU32());
+    a.trigB = static_cast<std::int32_t>(r.readU32());
+    a.trigWorld = r.readU8();
+    a.trigRoom = r.readU8();
+    a.trigEvt = r.readU16();
 }
 
 void read(ByteReader& r, ClockPing& p) { p.clientSendMs = r.readU64(); }
