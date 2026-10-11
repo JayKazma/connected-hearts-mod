@@ -2435,15 +2435,15 @@ static EventLoc g_trigLoc {};
 static ULONGLONG g_trigDeadline = 0;
 
 static uint64_t __fastcall HookedTrigger(int a, int b) {
-    uintptr_t before = 0;
-    __try { before = Context(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // Only triggers fired from free play count: room-entry events fire while the room is still
+    // loading and are followed by loading the host's room instead.
+    const bool freePlay = !g_replayingTrigger && warp::SafeGameplayForEventFollow() &&
+        warp::LoadSerial() == g_lastLoadSerial && GetTickCount64() - g_lastLoadMs >= 3000;
     const uint64_t r = g_origTrigger(a, b);
-    if (g_replayingTrigger) return r;
+    if (!freePlay) return r;
     __try {
         const uintptr_t after = Context();
-        // Room-entry events (just after a load) are followed by loading the host's room instead.
-        const bool afterLoad = warp::LoadSerial() != g_lastLoadSerial || GetTickCount64() - g_lastLoadMs < 3000;
-        if (after != 0 && after != before && !afterLoad) {
+        if (after != 0) {
             ++g_trigSeq; g_trigA = a; g_trigB = b; g_trigLoc = ReadLoc();
             Log("[cutscene] trigger %d/%d started an event at %02X/%02X evt %u; telling the other player (trigger %u)",
                 a, b, g_trigLoc.world, g_trigLoc.room, g_trigLoc.evt, g_trigSeq);

@@ -236,36 +236,37 @@ void __fastcall HookedRequestTransition(const LocationPacket* to, std::uint32_t 
 
 // Spawn groups the area script created for this load: header type, id, record object IDs.
 // Party slots: 0x236 player, 0x237 friend 1, 0x238 friend 2, 0x3EE world ally.
-bool DumpSpawnGroup(int i, char* line, std::size_t cap) {
-    __try {
-        const auto entry = g_exeBase + 0x2A10010 + static_cast<std::size_t>(i) * 16;
-        const auto key = *reinterpret_cast<const std::uint32_t*>(entry);
-        const auto flags = *reinterpret_cast<const std::uint32_t*>(entry + 4);
-        const auto controller = *reinterpret_cast<const uintptr_t*>(entry + 8);
-        if (!controller) return false;
-        const auto* h = *reinterpret_cast<const std::uint8_t* const*>(controller + 8);
-        if (!h) return false;
-        const unsigned records = *reinterpret_cast<const std::uint16_t*>(h + 4);
-        int n = std::snprintf(line, cap, "[spawngroup] %d key=%c%c%c%c flags=%X type=%u hflags=%02X id=%u records=%u extra=%u ids=",
-            i, (key & 0xFF) ? char(key & 0xFF) : '.', (key >> 8 & 0xFF) ? char(key >> 8 & 0xFF) : '.',
-            (key >> 16 & 0xFF) ? char(key >> 16 & 0xFF) : '.', (key >> 24) ? char(key >> 24) : '.', flags, h[0], h[1],
-            *reinterpret_cast<const std::uint16_t*>(h + 2), records, *reinterpret_cast<const std::uint16_t*>(h + 6));
-        for (unsigned r = 0; r < records && r < 24 && n > 0 && static_cast<std::size_t>(n) < cap - 16; ++r) {
-            const auto* rec = h + 0x2C + r * 0x40;
-            n += std::snprintf(line + n, cap - n, "%s%X", r ? "," : "", *reinterpret_cast<const std::uint32_t*>(rec));
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+// Reads go through ReadProcessMemory: a bad pointer fails the read instead of faulting.
+template <typename T> bool Peek(uintptr_t address, T& out) {
+    SIZE_T got = 0;
+    return address >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), &out, sizeof(T), &got) && got == sizeof(T);
 }
 
 void DumpSpawnGroups() {
     if (!g_log) return;
-    int count = 0;
-    __try { count = *reinterpret_cast<const std::int32_t*>(g_exeBase + 0x2A10418); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    std::int32_t count = 0;
+    if (!Peek(g_exeBase + 0x2A10418, count)) return;
     if (count < 0 || count > 64) { g_log("[spawngroup] count=%d out of range", count); return; }
-    char line[512];
-    for (int i = 0; i < count; ++i) if (DumpSpawnGroup(i, line, sizeof(line))) g_log("%s", line);
+    for (int i = 0; i < count; ++i) {
+        const auto entry = g_exeBase + 0x2A10010 + static_cast<std::size_t>(i) * 16;
+        std::uint32_t key = 0, flags = 0; uintptr_t controller = 0, header = 0;
+        if (!Peek(entry, key) || !Peek(entry + 4, flags) || !Peek(entry + 8, controller)) continue;
+        if (flags & 1) { g_log("[spawngroup] %d flags=%X (not a spawn group)", i, flags); continue; }
+        std::uint8_t h[0x2C] {};
+        if (!Peek(controller + 8, header) || !Peek(header, h)) { g_log("[spawngroup] %d flags=%X unreadable", i, flags); continue; }
+        const unsigned records = *reinterpret_cast<const std::uint16_t*>(h + 4);
+        char line[512];
+        auto c = [](std::uint32_t v) { const char ch = static_cast<char>(v & 0xFF); return ch >= 0x20 && ch < 0x7F ? ch : '.'; };
+        int n = std::snprintf(line, sizeof(line), "[spawngroup] %d key=%c%c%c%c flags=%X type=%u hflags=%02X id=%u records=%u extra=%u ids=",
+            i, c(key), c(key >> 8), c(key >> 16), c(key >> 24), flags, h[0], h[1],
+            *reinterpret_cast<const std::uint16_t*>(h + 2), records, *reinterpret_cast<const std::uint16_t*>(h + 6));
+        for (unsigned r = 0; r < records && r < 24 && n > 0 && static_cast<std::size_t>(n) < sizeof(line) - 16; ++r) {
+            std::uint32_t id = 0;
+            if (!Peek(header + 0x2C + r * 0x40, id)) break;
+            n += std::snprintf(line + n, sizeof(line) - n, "%s%X", r ? "," : "", id);
+        }
+        g_log("%s", line);
+    }
 }
 
 void CompleteLoad() {
