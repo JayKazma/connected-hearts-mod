@@ -1803,7 +1803,10 @@ using PFN_ResLookup = uintptr_t(__fastcall*)(const char* path, int group);
 using PFN_MsetPath = const char*(__fastcall*)(int weaponClass, int slot, char* out);
 
 static bool g_enabled = true;   // KH2COOP_WEAPON_SYNC=0 disables
-static bool g_diagOnly = false; // KH2COOP_WEAPON_SYNC=1: log the groups, never swap
+// Default: log the groups, never swap. Every swap since the crash guards became real faults in the
+// bank install (0x1E0D90) inside the load pump; the second one in a session crashed both games
+// (Twilight Town, 2026-10-11). KH2COOP_WEAPON_SYNC=2 swaps.
+static bool g_diagOnly = true;
 static bool g_ready = false;    // every signature matched
 static uintptr_t g_appliedActor[2] {}; // clone actor the item was last applied to
 static uint16_t g_appliedItem[2] {};
@@ -2354,7 +2357,7 @@ static void Install(uintptr_t exeBase) {
     char v[2] {};
     const bool set = GetEnvironmentVariableA("KH2COOP_WEAPON_SYNC", v, sizeof(v)) == 1;
     g_enabled = !(set && v[0] == '0');
-    g_diagOnly = set && v[0] == '1';
+    g_diagOnly = !(set && v[0] == '2');
     if (!g_enabled) { Log("[weapon] sync off (KH2COOP_WEAPON_SYNC=0); the owner's weapon is still streamed"); return; }
     for (const Sig& s : kSigs) {
         if (std::memcmp(reinterpret_cast<const void*>(exeBase + s.rva), s.bytes, sizeof(s.bytes)) != 0) {
@@ -2373,7 +2376,7 @@ static void Install(uintptr_t exeBase) {
     if (st == MH_OK) st = MH_EnableHook(queue);
     if (st != MH_OK) { Log("[weapon] resource queue hook failed: %d; weapon sync off", st); return; }
     g_ready = g_resolveHandle != nullptr;
-    Log("[weapon] sync ready (%s)%s", g_ready ? "all signatures matched" : "no handle resolver; off", g_diagOnly ? "; diagnostics only (KH2COOP_WEAPON_SYNC=1)" : "");
+    Log("[weapon] sync ready (%s)%s", g_ready ? "all signatures matched" : "no handle resolver; off", g_diagOnly ? "; diagnostics only (KH2COOP_WEAPON_SYNC=2 swaps)" : "");
 }
 } // namespace clonewpn
 
