@@ -437,6 +437,7 @@ struct PuppetDriver {
     uint16_t castId = 0, castCategory = 0; uint8_t castFlags = 0, castForm = 0;
     uint32_t nativeCastUntil = 0; // frames while the clone's own command path owns its motion
     bool pausedHold = false;      // the owner is paused: the clip is pinned at pausedTime
+    bool riding = false;          // playing a skateboard clip from the room board's motion set
     float pausedTime = 0.0f;
 };
 static PuppetDriver g_puppets[2];
@@ -3099,6 +3100,7 @@ static void ForgetPuppetActor(PuppetDriver& d) {
     d.teamSaved = false;
     d.noCollideSaved = false;
     d.lastAnim = -1;
+    d.riding = false; d.pausedHold = false;
     d.applied = false;
     d.boundActor = {};
 }
@@ -3180,6 +3182,7 @@ static void PollPuppetPoses() {
         if (wasApplied && !active) {
             RestorePuppetTeam(driver, i);
             driver.lastAnim = -1;
+            driver.riding = false; driver.pausedHold = false;
             driver.castPrimed = false; driver.castPending = false; driver.nativeCastUntil = 0;
             Log("Puppet %d released", i);
         } else if (!wasApplied && active) {
@@ -4141,6 +4144,7 @@ static void BindPuppetDrive(int index, uintptr_t actor) {
     if (d.actor != actor) {  // new room / reloaded actor
         d.actor = actor;
         d.lastAnim = -1;
+        d.riding = false; d.pausedHold = false;
         d.teamSaved = false;
         d.noCollideSaved = false;
         d.applied = false;
@@ -4159,6 +4163,30 @@ static PFN_MotionIndex g_motionIndex = nullptr;
 // Skateboard sync groundwork (task 25): where an actor's motion sets come from. Logs the
 // actor's objentry name and motion-set name, its two motion-set pointers (motCtrl+0/+8, both
 // searched by 0x3C7C50) and the ridden board (actor+0x2B0), and whether `motion` resolves.
+// Skateboard riding (task 25). The owner's riding clips (0xFC..0x106) are not in Sora's own motion
+// set: while riding, actor+0x2B8 points at the board's set (the F_TT010_SORA object's motCtrl+0)
+// and 0x3C7190(actor+0x158, motion, blend) plays them from it. A clone borrows the set of a board
+// in this game's room; without one it keeps the run/idle fallback.
+static constexpr uintptr_t ACTOR_RIDE_SET = 0x2B8;
+static constexpr uintptr_t RVA_PLAY_RIDE_MOTION = 0x3C7190;
+static constexpr uint8_t kPlayRideBytes[] = {0x40, 0x55, 0x56, 0x48, 0x83, 0xEC, 0x48};
+static int g_playRideOk = -1; // prologue checked once
+using PFN_PlayRideMotion = void(__fastcall*)(void* motCtrl, uint64_t motion, float blend);
+static bool IsRideMotion(uint32_t m) { return m >= 0xFC && m <= 0x106; }
+static uintptr_t FindRoomBoardSet() {
+    uintptr_t a = *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::active_entity_list::HEAD);
+    for (uint32_t n = 0; a != 0 && n < offsets::active_entity_list::MAX_TRAVERSAL; ++n) {
+        const auto obj = *reinterpret_cast<const uintptr_t*>(a + offsets::actor::OBJENTRY_PTR);
+        if (obj > g_exeBase && obj < g_exeBase + 0x3000000 &&
+            std::strncmp(reinterpret_cast<const char*>(obj + offsets::objentry::NAME), "F_TT010_SORA", 12) == 0) {
+            const uintptr_t set = *reinterpret_cast<const uintptr_t*>(a + ACTOR_MOTCTRL);
+            if (set) return set;
+        }
+        a = g_resolveHandle ? g_resolveHandle(*reinterpret_cast<const uint32_t*>(a + offsets::actor::LINKED_NEXT_HANDLE)) : 0;
+    }
+    return 0;
+}
+
 static void SkateDiag(const char* who, uintptr_t actor, uint32_t motion) {
     __try {
         char name[32], mset[32] = "?";
@@ -4197,6 +4225,37 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     PuppetDriver& d = g_puppets[index];
     const auto& pose = d.pose.pose;
     uint32_t motion = pose.motionId;
+    // The owner rides a skateboard: play the riding clip from a board's motion set in this room.
+    if (IsPlayerClassActor(actor)) {
+        if (g_playRideOk < 0) {
+            g_playRideOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_PLAY_RIDE_MOTION), kPlayRideBytes, sizeof(kPlayRideBytes)) == 0 ? 1 : 0;
+            if (!g_playRideOk) Log("[puppet] skateboard riding off: bytes at 0x3C7190 don't match");
+        }
+        const bool playRideOk = g_playRideOk == 1;
+        auto* rideSet = reinterpret_cast<uintptr_t*>(actor + ACTOR_RIDE_SET);
+        if (IsRideMotion(motion) && !(pose.flags & AvatarPaused) && playRideOk) {
+            if (!d.riding || static_cast<int>(motion) != d.lastAnim) {
+                const uintptr_t set = d.riding && *rideSet ? *rideSet : FindRoomBoardSet();
+                if (set) {
+                    *rideSet = set;
+                    reinterpret_cast<PFN_PlayRideMotion>(g_exeBase + RVA_PLAY_RIDE_MOTION)(
+                        reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), motion, 4.0f);
+                    if (!d.riding) Log("[puppet %d] riding: motion %u from board set %p", index, motion, reinterpret_cast<void*>(set));
+                    d.riding = true;
+                    d.lastAnim = static_cast<int>(motion);
+                    d.pendingMotion = -1; d.pendingFrames = 0;
+                    return;
+                }
+            } else {
+                return; // the clip plays on
+            }
+        } else if (d.riding && !IsRideMotion(motion)) {
+            *rideSet = 0;
+            d.riding = false;
+            d.lastAnim = -1; // rebind the next clip from the clone's own set
+            Log("[puppet %d] riding ended (motion %u)", index, motion);
+        }
+    }
     // The owner's game is paused: freeze the clone on the frame it was showing.
     if ((pose.flags & AvatarPaused) && d.lastAnim >= 0) {
         auto* clip = reinterpret_cast<float*>(actor + ACTOR_MOTCTRL + MOTCTRL_CURRENT_TIME);
