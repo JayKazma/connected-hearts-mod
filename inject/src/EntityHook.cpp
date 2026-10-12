@@ -1753,6 +1753,14 @@ static constexpr int CLONE_WEAPON_GROUP_DEFAULT = 0x138A;
 // placed above every other negative group, and nothing else moves it. Used when the pool has room.
 static constexpr int CLONE_WEAPON_GROUP_STABLE = -0x7000;
 static int g_cloneGroup = CLONE_WEAPON_GROUP_DEFAULT;
+static int g_weaponStable = -1;
+static bool WeaponStableOptIn() {
+    if (g_weaponStable < 0) {
+        char v[2] {};
+        g_weaponStable = GetEnvironmentVariableA("KH2COOP_WEAPON_STABLE", v, 2) == 1 && v[0] == '1' ? 1 : 0;
+    }
+    return g_weaponStable == 1;
+}
 
 struct Sig { uintptr_t rva; uint8_t bytes[8]; };
 static constexpr Sig kSigs[] = {
@@ -2131,7 +2139,9 @@ static int BeginJob() {
     if (g_cloneGroup != CLONE_WEAPON_GROUP_DEFAULT) reinterpret_cast<PFN_VoidI>(base + RVA_LOAD_RELEASE)(CLONE_WEAPON_GROUP_DEFAULT);
     {
         const int64_t headroom = PoolHeadroom();
-        const int chosen = headroom > (6ll << 20) ? CLONE_WEAPON_GROUP_STABLE : CLONE_WEAPON_GROUP_DEFAULT;
+        // The negative group crashed both games on its first live use (Twilight Town, 9.8 MB free,
+        // 2026-10-11): opt-in until it is understood (KH2COOP_WEAPON_STABLE=1).
+        const int chosen = WeaponStableOptIn() && headroom > (6ll << 20) ? CLONE_WEAPON_GROUP_STABLE : CLONE_WEAPON_GROUP_DEFAULT;
         if (chosen != g_cloneGroup || g_logged < 60) { ++g_logged; Log("[weapon] loader pool headroom %lld KB; clone keyblade group %d", static_cast<long long>(headroom >> 10), chosen); }
         g_cloneGroup = chosen;
     }
