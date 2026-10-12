@@ -3094,12 +3094,16 @@ static void RestorePuppetTeam(PuppetDriver& d, int index) {
 // and gate native Drive/Summon admission while any puppet is active.
 // Forgets a driver's cached actor without writing to it (the actor may be
 // mid-teardown or already freed).
+struct BoardLoan;
+static void ReturnLentBoard(const char* why);
+static int LentBoardPuppet();
 static void ForgetPuppetActor(PuppetDriver& d) {
     CloneGaugeClear(static_cast<int>(&d - g_puppets));
     d.actor = 0;
     d.teamSaved = false;
     d.noCollideSaved = false;
     d.lastAnim = -1;
+    if (d.riding && LentBoardPuppet() == static_cast<int>(&d - g_puppets)) ReturnLentBoard("clone gone");
     d.riding = false; d.pausedHold = false;
     d.applied = false;
     d.boundActor = {};
@@ -3182,6 +3186,7 @@ static void PollPuppetPoses() {
         if (wasApplied && !active) {
             RestorePuppetTeam(driver, i);
             driver.lastAnim = -1;
+            if (driver.riding && LentBoardPuppet() == i) ReturnLentBoard("puppet released");
             driver.riding = false; driver.pausedHold = false;
             driver.castPrimed = false; driver.castPending = false; driver.nativeCastUntil = 0;
             Log("Puppet %d released", i);
@@ -4144,6 +4149,7 @@ static void BindPuppetDrive(int index, uintptr_t actor) {
     if (d.actor != actor) {  // new room / reloaded actor
         d.actor = actor;
         d.lastAnim = -1;
+        if (d.riding && LentBoardPuppet() == index) ReturnLentBoard("new clone");
         d.riding = false; d.pausedHold = false;
         d.teamSaved = false;
         d.noCollideSaved = false;
@@ -4163,28 +4169,94 @@ static PFN_MotionIndex g_motionIndex = nullptr;
 // Skateboard sync groundwork (task 25): where an actor's motion sets come from. Logs the
 // actor's objentry name and motion-set name, its two motion-set pointers (motCtrl+0/+8, both
 // searched by 0x3C7C50) and the ridden board (actor+0x2B0), and whether `motion` resolves.
-// Skateboard riding (task 25). The owner's riding clips (0xFC..0x106) are not in Sora's own motion
-// set: while riding, actor+0x2B8 points at the board's set (the F_TT010_SORA object's motCtrl+0)
-// and 0x3C7190(actor+0x158, motion, blend) plays them from it. A clone borrows the set of a board
-// in this game's room; without one it keeps the run/idle fallback.
-static constexpr uintptr_t ACTOR_RIDE_SET = 0x2B8;
-static constexpr uintptr_t RVA_PLAY_RIDE_MOTION = 0x3C7190;
+// Skateboard riding (task 25). The owner's riding clips are not in Sora's own motion set: while
+// riding, actor+0x2B8 points at the board's set (the F_TT010_SORA object's motCtrl+0) and
+// 0x3C7190(actor+0x158, motion, blend) plays them from it. A clone borrows the set of a board in
+// this game's room, and the board itself: it is placed under the clone and plays the matching board
+// clip (the game pairs Sora's motion m with the board's m - 0x65) until the ride ends, then goes
+// back where it was. Without a board in the room the clone keeps the run/idle fallback.
+static constexpr uintptr_t ACTOR_RIDE_SET = 0x2B8, ACTOR_RIDDEN_BOARD = 0x2B0, ACTOR_CUR_MOTION = 0x180;
+static constexpr uintptr_t RVA_PLAY_RIDE_MOTION = 0x3C7190, RVA_MSET_ENTRY = 0x40D7A0;
 static constexpr uint8_t kPlayRideBytes[] = {0x40, 0x55, 0x56, 0x48, 0x83, 0xEC, 0x48};
-static int g_playRideOk = -1; // prologue checked once
+static constexpr uint8_t kMsetEntryBytes[] = {0x48, 0x83, 0xEC, 0x28, 0x44, 0x8B, 0xC2};
+static constexpr int BOARD_MOTION_OFFSET = 0x65;
+static int g_playRideOk = -1; // prologues checked once
 using PFN_PlayRideMotion = void(__fastcall*)(void* motCtrl, uint64_t motion, float blend);
-static bool IsRideMotion(uint32_t m) { return m >= 0xFC && m <= 0x106; }
-static uintptr_t FindRoomBoardSet() {
+using PFN_MsetEntry = uintptr_t(__fastcall*)(uintptr_t set, uint32_t id);
+
+static uintptr_t FindRoomBoard() {
     uintptr_t a = *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::active_entity_list::HEAD);
     for (uint32_t n = 0; a != 0 && n < offsets::active_entity_list::MAX_TRAVERSAL; ++n) {
         const auto obj = *reinterpret_cast<const uintptr_t*>(a + offsets::actor::OBJENTRY_PTR);
         if (obj > g_exeBase && obj < g_exeBase + 0x3000000 &&
-            std::strncmp(reinterpret_cast<const char*>(obj + offsets::objentry::NAME), "F_TT010_SORA", 12) == 0) {
-            const uintptr_t set = *reinterpret_cast<const uintptr_t*>(a + ACTOR_MOTCTRL);
-            if (set) return set;
-        }
+            std::strncmp(reinterpret_cast<const char*>(obj + offsets::objentry::NAME), "F_TT010_SORA", 12) == 0 &&
+            *reinterpret_cast<const uintptr_t*>(a + ACTOR_MOTCTRL) != 0)
+            return a;
         a = g_resolveHandle ? g_resolveHandle(*reinterpret_cast<const uint32_t*>(a + offsets::actor::LINKED_NEXT_HANDLE)) : 0;
     }
     return 0;
+}
+static bool SetHasMotion(uintptr_t set, int motion) {
+    return set && motion >= 0 && motion < 0x140 &&
+           reinterpret_cast<PFN_MsetEntry>(g_exeBase + RVA_MSET_ENTRY)(set, static_cast<uint32_t>(motion)) != 0;
+}
+
+// The room board lent to a riding clone (one at a time).
+struct BoardLoan {
+    uintptr_t board = 0;
+    int puppet = -1;
+    uint8_t world = 0, room = 0;
+    float pos[3] {};
+    float rotY = 0;
+    int motion = -1;
+};
+static BoardLoan g_boardLoan;
+static int LentBoardPuppet() { return g_boardLoan.board ? g_boardLoan.puppet : -1; }
+
+static float* EntityField(uintptr_t actor, uintptr_t field) {
+    return reinterpret_cast<float*>(actor + offsets::actor::ENTITY_TRANSFORM + field);
+}
+// Game thread, after the clone's update: the lent board sits under its clone.
+static void PlaceLentBoard(uintptr_t clone) {
+    if (!g_boardLoan.board || !clone) return;
+    __try {
+        for (int k = 0; k < 3; ++k) EntityField(g_boardLoan.board, offsets::entity::POS_X)[k] = EntityField(clone, offsets::entity::POS_X)[k];
+        *EntityField(g_boardLoan.board, offsets::entity::ROT_Y) = *EntityField(clone, offsets::entity::ROT_Y);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_boardLoan = {};
+    }
+}
+static void ReturnLentBoard(const char* why) {
+    if (!g_boardLoan.board) return;
+    const BoardLoan loan = g_boardLoan;
+    g_boardLoan = {};
+    __try {
+        const uint8_t world = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID);
+        const uint8_t room = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID);
+        if (world != loan.world || room != loan.room) return; // the room (and the board) is gone
+        for (int k = 0; k < 3; ++k) EntityField(loan.board, offsets::entity::POS_X)[k] = loan.pos[k];
+        *EntityField(loan.board, offsets::entity::ROT_Y) = loan.rotY;
+        if (loan.motion >= 0) g_setAnimationUnderlying(reinterpret_cast<void*>(loan.board + ACTOR_MOTCTRL), loan.motion, 4.0f, 0.0f);
+        Log("[puppet %d] board returned (%s)", loan.puppet, why);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[puppet %d] board return faulted (%s)", loan.puppet, why);
+    }
+}
+static void LendBoard(uintptr_t board, int puppet) {
+    if (g_boardLoan.board == board) return;
+    ReturnLentBoard("another board");
+    // The local player is riding it: leave it alone (the clone rides without a board).
+    if (g_soraActor && *reinterpret_cast<const uintptr_t*>(g_soraActor + ACTOR_RIDDEN_BOARD) == board) return;
+    BoardLoan loan;
+    loan.board = board; loan.puppet = puppet;
+    loan.world = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID);
+    loan.room = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID);
+    for (int k = 0; k < 3; ++k) loan.pos[k] = EntityField(board, offsets::entity::POS_X)[k];
+    loan.rotY = *EntityField(board, offsets::entity::ROT_Y);
+    loan.motion = *reinterpret_cast<const int*>(board + ACTOR_CUR_MOTION);
+    g_boardLoan = loan;
+    Log("[puppet %d] board %p lent (was at %.1f,%.1f,%.1f motion %d)", puppet, reinterpret_cast<void*>(board),
+        loan.pos[0], loan.pos[1], loan.pos[2], loan.motion);
 }
 
 static void SkateDiag(const char* who, uintptr_t actor, uint32_t motion) {
@@ -4228,31 +4300,38 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     // The owner rides a skateboard: play the riding clip from a board's motion set in this room.
     if (IsPlayerClassActor(actor)) {
         if (g_playRideOk < 0) {
-            g_playRideOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_PLAY_RIDE_MOTION), kPlayRideBytes, sizeof(kPlayRideBytes)) == 0 ? 1 : 0;
-            if (!g_playRideOk) Log("[puppet] skateboard riding off: bytes at 0x3C7190 don't match");
+            g_playRideOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_PLAY_RIDE_MOTION), kPlayRideBytes, sizeof(kPlayRideBytes)) == 0 &&
+                           std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_MSET_ENTRY), kMsetEntryBytes, sizeof(kMsetEntryBytes)) == 0 ? 1 : 0;
+            if (!g_playRideOk) Log("[puppet] skateboard riding off: function bytes don't match");
         }
-        const bool playRideOk = g_playRideOk == 1;
         auto* rideSet = reinterpret_cast<uintptr_t*>(actor + ACTOR_RIDE_SET);
-        if (IsRideMotion(motion) && !(pose.flags & AvatarPaused) && playRideOk) {
-            if (!d.riding || static_cast<int>(motion) != d.lastAnim) {
-                const uintptr_t set = d.riding && *rideSet ? *rideSet : FindRoomBoardSet();
-                if (set) {
-                    *rideSet = set;
-                    reinterpret_cast<PFN_PlayRideMotion>(g_exeBase + RVA_PLAY_RIDE_MOTION)(
-                        reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), motion, 4.0f);
-                    if (!d.riding) Log("[puppet %d] riding: motion %u from board set %p", index, motion, reinterpret_cast<void*>(set));
-                    d.riding = true;
-                    d.lastAnim = static_cast<int>(motion);
-                    d.pendingMotion = -1; d.pendingFrames = 0;
-                    return;
+        if (g_playRideOk == 1 && !(pose.flags & AvatarPaused) && motion >= 0xF0 && motion < 0x140) {
+            if (d.riding && static_cast<int>(motion) == d.lastAnim) { PlaceLentBoard(actor); return; } // the clip plays on
+            const uintptr_t board = g_boardLoan.board && g_boardLoan.puppet == index ? g_boardLoan.board : FindRoomBoard();
+            const uintptr_t set = board ? *reinterpret_cast<const uintptr_t*>(board + ACTOR_MOTCTRL) : 0;
+            if (SetHasMotion(set, static_cast<int>(motion))) {
+                *rideSet = set;
+                reinterpret_cast<PFN_PlayRideMotion>(g_exeBase + RVA_PLAY_RIDE_MOTION)(
+                    reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), motion, 4.0f);
+                if (!d.riding) Log("[puppet %d] riding: motion %u from board %p", index, motion, reinterpret_cast<void*>(board));
+                LendBoard(board, index);
+                if (g_boardLoan.board == board) {
+                    const int boardMotion = static_cast<int>(motion) - BOARD_MOTION_OFFSET;
+                    if (SetHasMotion(set, boardMotion))
+                        g_setAnimationUnderlying(reinterpret_cast<void*>(board + ACTOR_MOTCTRL), boardMotion, 4.0f, 0.0f);
+                    PlaceLentBoard(actor);
                 }
-            } else {
-                return; // the clip plays on
+                d.riding = true;
+                d.lastAnim = static_cast<int>(motion);
+                d.pendingMotion = -1; d.pendingFrames = 0;
+                return;
             }
-        } else if (d.riding && !IsRideMotion(motion)) {
+        }
+        if (d.riding && !(pose.flags & AvatarPaused)) {
             *rideSet = 0;
             d.riding = false;
             d.lastAnim = -1; // rebind the next clip from the clone's own set
+            if (g_boardLoan.puppet == index) ReturnLentBoard("ride ended");
             Log("[puppet %d] riding ended (motion %u)", index, motion);
         }
     }
@@ -5085,6 +5164,9 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             }
             ApplyPuppetTransform(actorObj, puppet);
             UpdatePauseTag(reinterpret_cast<uintptr_t>(actorObj), puppet);
+        } else if (g_boardLoan.board && reinterpret_cast<uintptr_t>(actorObj) == g_boardLoan.board &&
+                   g_boardLoan.puppet >= 0 && g_puppets[g_boardLoan.puppet].riding) {
+            PlaceLentBoard(g_puppets[g_boardLoan.puppet].actor); // the board updated after its clone
         } else if (savedFriendSlot != 0) {
             // Re-inject movement input after physics overwrites.
             // The motion controller tick (FUN_1403c6740) has already run
