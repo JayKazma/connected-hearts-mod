@@ -7,7 +7,8 @@
 // Every offset used here is [CONFIRMED] in pointer_map_v1.md /
 // HANDOFF_FRIEND_CONTROL.md. Things without a confirmed source are left to
 // the caller: `inEvent` (cutscene/load — set AvatarInCutscene), `downed`.
-// MP is not mapped yet and stays 0.
+// MP and level come from KH2 Lua library offsets (status +0x180/+0x184, Save+0x24FF) and are
+// left 0 (unknown) when implausible.
 // ============================================================================
 
 #include "kh2coop/KH2Offsets.hpp"
@@ -39,6 +40,9 @@ AvatarState captureAvatar(const Reader& mem, std::uint64_t exeBase, std::uint64_
     a.roomId = mem.template read<std::uint8_t>(exeBase + o::ROOM_ID);
     a.hp = mem.template read<std::int32_t>(exeBase + o::slot0::HP);
     a.maxHp = mem.template read<std::int32_t>(exeBase + o::slot0::MAX_HP);
+    std::uint64_t statusRecord = exeBase + o::slot0::HP;
+    const auto level = mem.template read<std::uint8_t>(exeBase + o::SORA_LEVEL);
+    a.level = level >= 1 && level <= 99 ? level : 0;
     if (inEvent) a.flags |= AvatarInCutscene;
     if (downed) a.flags |= AvatarDowned;
     if (actor == 0) {
@@ -52,7 +56,12 @@ AvatarState captureAvatar(const Reader& mem, std::uint64_t exeBase, std::uint64_
     if (status > exeBase && status < exeBase + 0x3000000ULL) {
         const auto hp = mem.template read<std::int32_t>(status);
         const auto maxHp = mem.template read<std::int32_t>(status + 4);
-        if (maxHp > 0 && hp >= 0 && hp <= maxHp) { a.hp = hp; a.maxHp = maxHp; }
+        if (maxHp > 0 && hp >= 0 && hp <= maxHp) { a.hp = hp; a.maxHp = maxHp; statusRecord = status; }
+    }
+    {   // MP from the same record; anything implausible stays unknown (0/0).
+        const auto mp = mem.template read<std::int32_t>(statusRecord + o::status::MP);
+        const auto maxMp = mem.template read<std::int32_t>(statusRecord + o::status::MAX_MP);
+        if (maxMp > 0 && maxMp <= 999 && mp >= 0 && mp <= maxMp) { a.mp = mp; a.maxMp = maxMp; }
     }
 
     const std::uint64_t entity = actor + o::actor::ENTITY_TRANSFORM;

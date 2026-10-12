@@ -436,6 +436,8 @@ struct PuppetDriver {
     bool castPending = false;    // a replay waits for the clone's next movement update
     uint16_t castId = 0, castCategory = 0; uint8_t castFlags = 0, castForm = 0;
     uint32_t nativeCastUntil = 0; // frames while the clone's own command path owns its motion
+    bool pausedHold = false;      // the owner is paused: the clip is pinned at pausedTime
+    float pausedTime = 0.0f;
 };
 static PuppetDriver g_puppets[2];
 static uintptr_t g_cloneCommandActor = 0; // clone executing a replayed command right now (clonecast)
@@ -4140,6 +4142,31 @@ static void BindPuppetDrive(int index, uintptr_t actor) {
 // only the player's board set carries.
 using PFN_MotionIndex = int(__fastcall*)(void* motCtrl, int slot);
 static PFN_MotionIndex g_motionIndex = nullptr;
+
+// Skateboard sync groundwork (task 25): where an actor's motion sets come from. Logs the
+// actor's objentry name and motion-set name, its two motion-set pointers (motCtrl+0/+8, both
+// searched by 0x3C7C50) and the ridden board (actor+0x2B0), and whether `motion` resolves.
+static void SkateDiag(const char* who, uintptr_t actor, uint32_t motion) {
+    __try {
+        char name[32], mset[32] = "?";
+        ActorName(actor, name);
+        const auto obj = *reinterpret_cast<const uintptr_t*>(actor + offsets::actor::OBJENTRY_PTR);
+        if (obj > g_exeBase && obj < g_exeBase + 0x3000000) {
+            std::memcpy(mset, reinterpret_cast<const void*>(obj + offsets::objentry::MSET_NAME), 31);
+            mset[31] = '\0';
+        }
+        const auto* ctl = reinterpret_cast<const uintptr_t*>(actor + ACTOR_MOTCTRL);
+        const uintptr_t board = *reinterpret_cast<const uintptr_t*>(actor + 0x2B0);
+        char boardName[32] = "-";
+        if (board > 0x10000) ActorName(board, boardName);
+        const int idx = g_motionIndex ? g_motionIndex(reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), static_cast<int>(motion)) : -2;
+        Log("[skate] %s actor=%p obj='%s' mset='%s' set0=%p set1=%p board=%p '%s' motion %u -> %d",
+            who, reinterpret_cast<void*>(actor), name, mset, reinterpret_cast<void*>(ctl[0]),
+            reinterpret_cast<void*>(ctl[1]), reinterpret_cast<void*>(board), boardName, motion, idx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[skate] %s: exception reading actor %p", who, reinterpret_cast<void*>(actor));
+    }
+}
 static constexpr uint8_t kMotionIndexBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18,
                                                 0x48, 0x89, 0x7C, 0x24, 0x20, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x20};
 
@@ -4152,6 +4179,14 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     PuppetDriver& d = g_puppets[index];
     const auto& pose = d.pose.pose;
     uint32_t motion = pose.motionId;
+    // The owner's game is paused: freeze the clone on the frame it was showing.
+    if ((pose.flags & AvatarPaused) && d.lastAnim >= 0) {
+        auto* clip = reinterpret_cast<float*>(actor + ACTOR_MOTCTRL + MOTCTRL_CURRENT_TIME);
+        if (!d.pausedHold) { d.pausedHold = true; d.pausedTime = *clip; }
+        *clip = d.pausedTime;
+        return;
+    }
+    d.pausedHold = false;
     // A Sora clone has Sora's moveset. But setting motion 9 (seen during a
     // Fire cast) on a clone crashed the game (VUH-1489, 2026-10-02), so it's
     // held at idle until the spell path is understood. Attack 151 and the
@@ -4183,6 +4218,8 @@ static void DrivePuppetMotion(void* actorObj, int index) {
             if (motion >= 1024 || !(d.missingLogged[motion >> 6] & (1ull << (motion & 63)))) {
                 if (motion < 1024) d.missingLogged[motion >> 6] |= 1ull << (motion & 63);
                 Log("[puppet %d] motion %u not in the clone's set; using run/idle", index, motion);
+                SkateDiag("clone", actor, motion);
+                if (g_soraActor) SkateDiag("local", g_soraActor, motion);
             }
             const float speed2 = pose.velocity.x * pose.velocity.x + pose.velocity.z * pose.velocity.z;
             motion = speed2 > 1.0f ? ANIM_RUN : ANIM_IDLE;
@@ -4348,7 +4385,7 @@ static void UpdatePauseTag(uintptr_t actor, int index) {
             char v[16] {};
             const DWORD n = GetEnvironmentVariableA("KH2COOP_TAG_HEIGHT", v, sizeof(v));
             const float h = n > 0 && n < sizeof(v) ? static_cast<float>(std::atof(v)) : 0.0f;
-            return h > 0.0f && h < 1000.0f ? h : 190.0f;
+            return h > 0.0f && h < 1000.0f ? h : 165.0f;
         }();
         const uintptr_t entity = actor + offsets::actor::ENTITY_TRANSFORM;
         const float head[3] = {*reinterpret_cast<float*>(entity + offsets::entity::POS_X),
@@ -4945,6 +4982,14 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit
             if (LocalPaused()) avatar.flags |= AvatarPaused;
+            {   // task 25 groundwork: the owner's own skateboard clips (0xFC..0x106), once per motion
+                static uint16_t skateLogged = 0;
+                const uint32_t m = avatar.motionId;
+                if (m >= 0xFC && m <= 0x106 && !(skateLogged & (1u << (m - 0xFC)))) {
+                    skateLogged |= static_cast<uint16_t>(1u << (m - 0xFC));
+                    SkateDiag("owner", g_soraActor, m);
+                }
+            }
             // VUH-1787: an own room load stops this stream; flag it so peers hide, not hold.
             AcquireSRWLockExclusive(&g_localPublishLock);
             avatar = g_localAvatar.Captured(avatar, warp::LoadPending());

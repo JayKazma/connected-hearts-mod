@@ -292,7 +292,7 @@ bool DrawTag(const wchar_t* text, float scale, unsigned& width, unsigned& height
              std::vector<std::uint8_t>& out) {
     if (!EnsureGdiplus()) return false;
     const float s = std::clamp(scale, 0.5f, 4.0f);
-    Font font(L"Segoe UI", 15 * s, FontStyleBold, UnitPixel);
+    Font font(L"Segoe UI", 16 * s, FontStyleBold, UnitPixel);
     StringFormat fmt; fmt.SetAlignment(StringAlignmentCenter); fmt.SetLineAlignment(StringAlignmentCenter);
     fmt.SetFormatFlags(StringFormatFlagsNoWrap);
     RectF measured;
@@ -302,7 +302,7 @@ bool DrawTag(const wchar_t* text, float scale, unsigned& width, unsigned& height
         pg.SetTextRenderingHint(TextRenderingHintAntiAlias);
         pg.MeasureString(text, -1, &font, PointF(0, 0), &fmt, &measured);
     }
-    const float padX = 12 * s, padY = 4 * s, border = 2 * s;
+    const float padX = 10 * s, padY = 2 * s, border = std::max(1.0f, 1.5f * s);
     width = static_cast<unsigned>(measured.Width + 2 * padX + 2 * border + 0.5f);
     height = static_cast<unsigned>(measured.Height + 2 * padY + 2 * border + 0.5f);
     width = std::clamp(width, 16u, 1024u); height = std::clamp(height, 8u, 256u);

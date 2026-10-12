@@ -666,7 +666,7 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU64(a.serverTimeMs);
     w.writeU8(static_cast<std::uint8_t>(a.ownerSlot));
     w.writeU8(a.character);
-    w.writeU8(a.colorVariant);
+    w.writeU8(a.level);
     w.writeU16(a.worldId);
     w.writeU16(a.roomId);
     write(w, a.position);
@@ -1100,7 +1100,7 @@ void read(ByteReader& r, AvatarState& a) {
     a.serverTimeMs = r.readU64();
     a.ownerSlot = static_cast<SlotType>(r.readU8());
     a.character = r.readU8();
-    a.colorVariant = r.readU8();
+    a.level = r.readU8();
     a.worldId = r.readU16();
     a.roomId = r.readU16();
     read(r, a.position);

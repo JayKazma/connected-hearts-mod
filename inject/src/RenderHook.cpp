@@ -1103,7 +1103,8 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame, int tagCount, const pa
                   EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) &&
                   EnsureOverlayTexture(g_overlayLayout.width, g_overlayLayout.height);
     const bool drawTags = tagCount > 0 && !g_blendFailed && bbDesc.Width >= 64 && bbDesc.Height >= 64 &&
-                          EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) && EnsureTagTexture(bbDesc.Height);
+                          EnsureBlendPipeline(RtvFormatFor(bbDesc.Format)) &&
+                          EnsureTagTexture(static_cast<UINT>(std::min(static_cast<float>(bbDesc.Height), static_cast<float>(bbDesc.Width) * 9.0f / 16.0f)));
     if (!drawOverlay && !drawTags && !captureFrame) { backbuffer->Release(); return; }
 
     if (captureFrame) {
@@ -1209,12 +1210,16 @@ void SubmitFrameWork(bool drawOverlay, bool captureFrame, int tagCount, const pa
             tagSrv.ptr += g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             ctx.list->SetGraphicsRootDescriptorTable(1, tagSrv);
             const float tw = static_cast<float>(g_tagW), th = static_cast<float>(g_tagH);
+            // The game draws a 16:9 picture centred in the backbuffer (black bars around it in a
+            // window of another shape); the projection is relative to that picture.
+            const float cw = std::min(bw, bh * 16.0f / 9.0f), ch = cw * 9.0f / 16.0f;
+            const float ox = (bw - cw) / 2.0f, oy = (bh - ch) / 2.0f;
             for (int t = 0; t < tagCount; ++t) {
-                // Bottom-centre at the projected head, kept inside the screen.
-                float left = std::floor(tags[t].nx * bw - tw / 2.0f);
-                float top = std::floor(tags[t].ny * bh - th);
-                left = std::clamp(left, 0.0f, std::max(0.0f, bw - tw));
-                top = std::clamp(top, 0.0f, std::max(0.0f, bh - th));
+                // Bottom-centre at the projected head, kept inside the picture.
+                float left = std::floor(ox + tags[t].nx * cw - tw / 2.0f);
+                float top = std::floor(oy + tags[t].ny * ch - th);
+                left = std::clamp(left, ox, std::max(ox, ox + cw - tw));
+                top = std::clamp(top, oy, std::max(oy, oy + ch - th));
                 const float rect[4] = {left / bw * 2.0f - 1.0f, 1.0f - top / bh * 2.0f, 2.0f * tw / bw, 2.0f * th / bh};
                 ctx.list->SetGraphicsRoot32BitConstants(0, 4, rect, 0);
                 ctx.list->DrawInstanced(4, 1, 0, 0);

@@ -1807,7 +1807,10 @@ int main(int argc, char* argv[]) {
         (void)avatarBridge.PublishRosterNames(kh2coop::hudnames::Bind(
             admittedHudNames, hudAuthority, GetTickCount64(), admittedHudNameSession, worldSessionId));
         kh2coop::AvatarState local;
+        static kh2coop::AvatarState partyLocal {}; // newest local avatar, for the launcher's [Party] line
+        static bool partyLocalValid = false;
         if (avatarBridge.TryReadLocal(local)) {
+            partyLocal = local; partyLocalValid = true;
             // Network seq is per send (sendAvatar restamps 0), so receivers can
             // count gaps as loss; the DLL's frame counter stays in recordings.
             kh2coop::LocalDownedState downed;
@@ -1892,6 +1895,35 @@ int main(int argc, char* argv[]) {
                 // Interpolated output carries renderMs; extrapolated output retains newest source time.
                 if (targets[i].pose.serverTimeMs < renderMs) ++avatarUnderrunSamples[i];
                 if (targets[i].pose.flags & kh2coop::AvatarHeld) ++avatarHeldSamples[i];
+            }
+        }
+        {   // Launcher player cards: both players' level, HP/MP, keyblade and location, when changed
+            // (at most once a second). "-" marks a peer with no recent state.
+            static std::uint64_t partyAt = 0;
+            static std::string partyLast;
+            const std::uint64_t partyNow = GetTickCount64();
+            if (partyLocalValid && partyNow - partyAt >= 1000) {
+                partyAt = partyNow;
+                const auto describe = [](const kh2coop::AvatarState& a) {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "lv=%u hp=%d/%d mp=%d/%d kb=%u world=%u room=%u paused=%d",
+                                  static_cast<unsigned>(a.level), a.hp, a.maxHp, a.mp, a.maxMp,
+                                  static_cast<unsigned>(a.weaponItem), static_cast<unsigned>(a.worldId),
+                                  static_cast<unsigned>(a.roomId), (a.flags & kh2coop::AvatarPaused) ? 1 : 0);
+                    return std::string(buf);
+                };
+                std::string line = "[Party] me " + describe(partyLocal) + " | peer ";
+                const kh2coop::AvatarState* peer = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(replicaMtx);
+                    const auto owners = avatarSync.puppetOwners();
+                    for (int i = 0; i < 2 && !peer; ++i) {
+                        const auto* p = avatarSync.newestFor(owners[i]);
+                        if (p && serverNowMs >= p->serverTimeMs && serverNowMs - p->serverTimeMs < 5000) peer = p;
+                    }
+                    line += peer ? describe(*peer) : std::string("-");
+                }
+                if (line != partyLast) { partyLast = line; std::cout << line << "\n"; }
             }
         }
         const auto traceNow = avatarLatencyTraceBudget ? GetTickCount64() : 0;

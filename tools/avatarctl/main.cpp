@@ -347,7 +347,7 @@ void writeObservedAvatar(std::ostream& out, const AvatarState& value) {
     out << "{\"seq\":" << value.seq << ",\"serverTimeMs\":" << value.serverTimeMs
         << ",\"ownerSlot\":" << static_cast<unsigned>(value.ownerSlot)
         << ",\"character\":" << static_cast<unsigned>(value.character)
-        << ",\"colorVariant\":" << static_cast<unsigned>(value.colorVariant)
+        << ",\"level\":" << static_cast<unsigned>(value.level)
         << ",\"worldId\":" << value.worldId << ",\"roomId\":" << value.roomId
         << ",\"finite\":" << (finite ? "true" : "false") << ",\"position\":";
     writeObservedVector(out, value.position);

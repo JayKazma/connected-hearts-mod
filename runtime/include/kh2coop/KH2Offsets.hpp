@@ -255,6 +255,13 @@ namespace slot0 {
     constexpr std::uint64_t HP         = 0x2A23598;    // [CONFIRMED] = SLOT0_BASE + 0x80
     constexpr std::uint64_t MAX_HP     = 0x2A2359C;    // [CONFIRMED] = SLOT0_BASE + 0x84
 }
+// Within a status record (HP at +0; the KH2 Lua library's Slot1+0x180/+0x184).
+namespace status {
+    constexpr std::uint64_t MP         = 0x180;        // int32 [KH2LIB] current MP
+    constexpr std::uint64_t MAX_MP     = 0x184;        // int32 [KH2LIB] max MP
+}
+// Sora's level: the KH2 Lua library's Save+0x24FF, on the confirmed save base (KH2J magic).
+constexpr std::uint64_t SORA_LEVEL     = 0x09A98B0 + 0x24FF; // u8 [KH2LIB]
 
 constexpr std::uint64_t MAX_DRIVE      = 0x2A236CA;   // [KH2LIB] Max drive gauge
 

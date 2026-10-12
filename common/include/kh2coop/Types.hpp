@@ -152,7 +152,7 @@ struct AvatarState {
     std::uint64_t serverTimeMs {0}; // owner's estimate of server time at capture
     SlotType ownerSlot {SlotType::Player}; // set by the relay
     std::uint8_t character {0};      // roster entry; 0 = Sora
-    std::uint8_t colorVariant {0};
+    std::uint8_t level {0};          // owner's character level (was colorVariant, never used); 0 = unknown
     std::uint16_t worldId {0};
     std::uint16_t roomId {0};
     Vec3 position {};

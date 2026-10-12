@@ -65,7 +65,7 @@ void testCodec() {
     a.serverTimeMs = 123456789012ULL;
     a.ownerSlot = SlotType::Friend2;
     a.character = 3;
-    a.colorVariant = 2;
+    a.level = 2;
     a.worldId = 4;
     a.roomId = 0x1A;
     a.position = {1.5f, -2.0f, 300.25f};
@@ -95,7 +95,7 @@ void testCodec() {
     check(type == PacketType::AvatarRelay, "avatar relay packet type");
     check(b.seq == a.seq && b.serverTimeMs == a.serverTimeMs &&
               b.ownerSlot == a.ownerSlot && b.character == 3 &&
-              b.colorVariant == 2 && b.worldId == 4 && b.roomId == 0x1A,
+              b.level == 2 && b.worldId == 4 && b.roomId == 0x1A,
           "avatar identity/room fields round-trip");
     check(dist(a.position, b.position) == 0.0f && b.rotationY == a.rotationY &&
               dist(a.velocity, b.velocity) == 0.0f,
