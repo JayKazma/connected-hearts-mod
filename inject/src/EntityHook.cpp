@@ -71,6 +71,7 @@
 #include "DownedSpectateChannel.hpp"
 #include "PuppetHold.hpp"
 #include "PauseTag.hpp"
+#include "SafeMemory.hpp"
 #include "SpawnPickHook.hpp"
 
 namespace kh2coop {
@@ -3094,16 +3095,14 @@ static void RestorePuppetTeam(PuppetDriver& d, int index) {
 // and gate native Drive/Summon admission while any puppet is active.
 // Forgets a driver's cached actor without writing to it (the actor may be
 // mid-teardown or already freed).
-struct BoardLoan;
-static void ReturnLentBoard(const char* why);
-static int LentBoardPuppet();
+static void ForgetCloneBoard(int i);
 static void ForgetPuppetActor(PuppetDriver& d) {
     CloneGaugeClear(static_cast<int>(&d - g_puppets));
     d.actor = 0;
     d.teamSaved = false;
     d.noCollideSaved = false;
     d.lastAnim = -1;
-    if (d.riding && LentBoardPuppet() == static_cast<int>(&d - g_puppets)) ReturnLentBoard("clone gone");
+    ForgetCloneBoard(static_cast<int>(&d - g_puppets)); // a board it left stays where it is
     d.riding = false; d.pausedHold = false;
     d.applied = false;
     d.boundActor = {};
@@ -3186,7 +3185,7 @@ static void PollPuppetPoses() {
         if (wasApplied && !active) {
             RestorePuppetTeam(driver, i);
             driver.lastAnim = -1;
-            if (driver.riding && LentBoardPuppet() == i) ReturnLentBoard("puppet released");
+            ForgetCloneBoard(i);
             driver.riding = false; driver.pausedHold = false;
             driver.castPrimed = false; driver.castPending = false; driver.nativeCastUntil = 0;
             Log("Puppet %d released", i);
@@ -4149,7 +4148,7 @@ static void BindPuppetDrive(int index, uintptr_t actor) {
     if (d.actor != actor) {  // new room / reloaded actor
         d.actor = actor;
         d.lastAnim = -1;
-        if (d.riding && LentBoardPuppet() == index) ReturnLentBoard("new clone");
+        ForgetCloneBoard(index);
         d.riding = false; d.pausedHold = false;
         d.teamSaved = false;
         d.noCollideSaved = false;
@@ -4201,62 +4200,79 @@ static bool SetHasMotion(uintptr_t set, int motion) {
            reinterpret_cast<PFN_MsetEntry>(g_exeBase + RVA_MSET_ENTRY)(set, static_cast<uint32_t>(motion)) != 0;
 }
 
-// The room board lent to a riding clone (one at a time).
-struct BoardLoan {
-    uintptr_t board = 0;
-    int puppet = -1;
+// Each riding clone gets its own board: a second F_TT010_SORA made with the game's actor factory
+// (0x3DF930(objId, &pos4, rotY), as item drops do) and given the room board's spawn context
+// (0x3B4BD0: controller and record, as a placed object gets them). It sits under the clone while it
+// rides and stays where the clone got off, like a board its owner left; the next ride takes it
+// back. The room's own board is never touched. A board the local player picks up becomes theirs.
+static constexpr uintptr_t RVA_CREATE_ACTOR = 0x3DF930, RVA_ACTOR_RECORD_INIT = 0x3B4BD0;
+static constexpr uintptr_t ACTOR_SPAWN_CONTEXT = 0x9E8, ACTOR_SPAWN_RECORD = 0x9F0;
+static constexpr uint8_t kCreateActorBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08};
+using PFN_CreateActor = uintptr_t(__fastcall*)(uint64_t objId, const float* pos4, float rotY);
+using PFN_ActorRecordInit = void(__fastcall*)(uintptr_t actor, uintptr_t context, uintptr_t record);
+struct CloneBoard {
+    uintptr_t actor = 0, objentry = 0;
     uint8_t world = 0, room = 0;
-    float pos[3] {};
-    float rotY = 0;
-    int motion = -1;
+    bool ridden = false;
 };
-static BoardLoan g_boardLoan;
-static int LentBoardPuppet() { return g_boardLoan.board ? g_boardLoan.puppet : -1; }
+static CloneBoard g_cloneBoards[2];
+static int g_createActorOk = -1;
 
 static float* EntityField(uintptr_t actor, uintptr_t field) {
     return reinterpret_cast<float*>(actor + offsets::actor::ENTITY_TRANSFORM + field);
 }
-// Game thread, after the clone's update: the lent board sits under its clone.
-static void PlaceLentBoard(uintptr_t clone) {
-    if (!g_boardLoan.board || !clone) return;
-    __try {
-        for (int k = 0; k < 3; ++k) EntityField(g_boardLoan.board, offsets::entity::POS_X)[k] = EntityField(clone, offsets::entity::POS_X)[k];
-        *EntityField(g_boardLoan.board, offsets::entity::ROT_Y) = *EntityField(clone, offsets::entity::ROT_Y);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_boardLoan = {};
+static void ForgetCloneBoard(int i) { if (i >= 0 && i < 2) g_cloneBoards[i] = {}; }
+// Still this room's object of the same kind, and not taken by the local player. Reads go through
+// SafeCopy (a __try here hangs clang 18's MinGW codegen); the callers run inside the update guard.
+static bool CloneBoardUsable(int i) {
+    CloneBoard& b = g_cloneBoards[i];
+    if (!b.actor) return false;
+    uint8_t world = 0, room = 0;
+    uintptr_t objentry = 0, ridden = 0;
+    if (!SafeCopy(&world, reinterpret_cast<const void*>(g_exeBase + offsets::WORLD_ID), 1) ||
+        !SafeCopy(&room, reinterpret_cast<const void*>(g_exeBase + offsets::ROOM_ID), 1) ||
+        !SafeCopy(&objentry, reinterpret_cast<const void*>(b.actor + offsets::actor::OBJENTRY_PTR), sizeof(objentry)) ||
+        world != b.world || room != b.room || objentry != b.objentry) { b = {}; return false; }
+    if (g_soraActor && SafeCopy(&ridden, reinterpret_cast<const void*>(g_soraActor + ACTOR_RIDDEN_BOARD), sizeof(ridden)) && ridden == b.actor) {
+        Log("[puppet %d] the local player took the clone's board", i);
+        b = {};
+        return false;
     }
+    return true;
 }
-static void ReturnLentBoard(const char* why) {
-    if (!g_boardLoan.board) return;
-    const BoardLoan loan = g_boardLoan;
-    g_boardLoan = {};
-    __try {
-        const uint8_t world = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID);
-        const uint8_t room = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID);
-        if (world != loan.world || room != loan.room) return; // the room (and the board) is gone
-        for (int k = 0; k < 3; ++k) EntityField(loan.board, offsets::entity::POS_X)[k] = loan.pos[k];
-        *EntityField(loan.board, offsets::entity::ROT_Y) = loan.rotY;
-        if (loan.motion >= 0) g_setAnimationUnderlying(reinterpret_cast<void*>(loan.board + ACTOR_MOTCTRL), loan.motion, 4.0f, 0.0f);
-        Log("[puppet %d] board returned (%s)", loan.puppet, why);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("[puppet %d] board return faulted (%s)", loan.puppet, why);
+static uintptr_t SpawnCloneBoard(int i, uintptr_t clone, uintptr_t roomBoard) {
+    if (g_createActorOk < 0) {
+        g_createActorOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_CREATE_ACTOR), kCreateActorBytes, sizeof(kCreateActorBytes)) == 0 ? 1 : 0;
+        if (!g_createActorOk) Log("[puppet] clone boards off: bytes at 0x3DF930 don't match");
     }
+    if (g_createActorOk != 1 || !roomBoard) return 0;
+    const uintptr_t objentry = *reinterpret_cast<const uintptr_t*>(roomBoard + offsets::actor::OBJENTRY_PTR);
+    const uint32_t objId = *reinterpret_cast<const uint32_t*>(objentry + offsets::objentry::OBJECT_ID);
+    const float* at = EntityField(clone, offsets::entity::POS_X);
+    const float pos[4] = {at[0], at[1], at[2], 0.0f};
+    const uintptr_t board = reinterpret_cast<PFN_CreateActor>(g_exeBase + RVA_CREATE_ACTOR)(objId, pos, 0.0f);
+    if (!board) { Log("[puppet %d] no clone board: the game refused to create object 0x%X", i, objId); return 0; }
+    const uintptr_t context = *reinterpret_cast<const uintptr_t*>(roomBoard + ACTOR_SPAWN_CONTEXT);
+    const uintptr_t record = *reinterpret_cast<const uintptr_t*>(roomBoard + ACTOR_SPAWN_RECORD);
+    if (record) reinterpret_cast<PFN_ActorRecordInit>(g_exeBase + RVA_ACTOR_RECORD_INIT)(board, context, record);
+    CloneBoard& b = g_cloneBoards[i];
+    b.actor = board;
+    b.objentry = *reinterpret_cast<const uintptr_t*>(board + offsets::actor::OBJENTRY_PTR);
+    b.world = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID);
+    b.room = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID);
+    b.ridden = false;
+    Log("[puppet %d] clone board %p created (object 0x%X, record %p)", i, reinterpret_cast<void*>(board), objId, reinterpret_cast<void*>(record));
+    return board;
 }
-static void LendBoard(uintptr_t board, int puppet) {
-    if (g_boardLoan.board == board) return;
-    ReturnLentBoard("another board");
-    // The local player is riding it: leave it alone (the clone rides without a board).
-    if (g_soraActor && *reinterpret_cast<const uintptr_t*>(g_soraActor + ACTOR_RIDDEN_BOARD) == board) return;
-    BoardLoan loan;
-    loan.board = board; loan.puppet = puppet;
-    loan.world = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::WORLD_ID);
-    loan.room = *reinterpret_cast<const uint8_t*>(g_exeBase + offsets::ROOM_ID);
-    for (int k = 0; k < 3; ++k) loan.pos[k] = EntityField(board, offsets::entity::POS_X)[k];
-    loan.rotY = *EntityField(board, offsets::entity::ROT_Y);
-    loan.motion = *reinterpret_cast<const int*>(board + ACTOR_CUR_MOTION);
-    g_boardLoan = loan;
-    Log("[puppet %d] board %p lent (was at %.1f,%.1f,%.1f motion %d)", puppet, reinterpret_cast<void*>(board),
-        loan.pos[0], loan.pos[1], loan.pos[2], loan.motion);
+// Game thread, after the clone's update (and after the board's own): the board sits under its clone.
+static void PlaceCloneBoard(int i, uintptr_t clone) {
+    CloneBoard& b = g_cloneBoards[i];
+    if (!b.actor || !b.ridden || !clone) return;
+    float pose[4];
+    if (!SafeCopy(pose, EntityField(clone, offsets::entity::POS_X), 3 * sizeof(float)) ||
+        !SafeCopy(&pose[3], EntityField(clone, offsets::entity::ROT_Y), sizeof(float)) ||
+        !SafeStore(EntityField(b.actor, offsets::entity::POS_X), pose, 3 * sizeof(float)) ||
+        !SafeStore(EntityField(b.actor, offsets::entity::ROT_Y), &pose[3], sizeof(float))) b = {};
 }
 
 static void SkateDiag(const char* who, uintptr_t actor, uint32_t motion) {
@@ -4297,7 +4313,7 @@ static void DrivePuppetMotion(void* actorObj, int index) {
     PuppetDriver& d = g_puppets[index];
     const auto& pose = d.pose.pose;
     uint32_t motion = pose.motionId;
-    // The owner rides a skateboard: play the riding clip from a board's motion set in this room.
+    // The owner rides a skateboard: play the riding clip from the board motion set, on the clone's own board.
     if (IsPlayerClassActor(actor)) {
         if (g_playRideOk < 0) {
             g_playRideOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_PLAY_RIDE_MOTION), kPlayRideBytes, sizeof(kPlayRideBytes)) == 0 &&
@@ -4306,20 +4322,23 @@ static void DrivePuppetMotion(void* actorObj, int index) {
         }
         auto* rideSet = reinterpret_cast<uintptr_t*>(actor + ACTOR_RIDE_SET);
         if (g_playRideOk == 1 && !(pose.flags & AvatarPaused) && motion >= 0xF0 && motion < 0x140) {
-            if (d.riding && static_cast<int>(motion) == d.lastAnim) { PlaceLentBoard(actor); return; } // the clip plays on
-            const uintptr_t board = g_boardLoan.board && g_boardLoan.puppet == index ? g_boardLoan.board : FindRoomBoard();
-            const uintptr_t set = board ? *reinterpret_cast<const uintptr_t*>(board + ACTOR_MOTCTRL) : 0;
+            if (d.riding && static_cast<int>(motion) == d.lastAnim) { PlaceCloneBoard(index, actor); return; } // the clip plays on
+            uintptr_t board = CloneBoardUsable(index) ? g_cloneBoards[index].actor : 0;
+            const uintptr_t roomBoard = board ? 0 : FindRoomBoard();
+            const uintptr_t set = board ? *reinterpret_cast<const uintptr_t*>(board + ACTOR_MOTCTRL)
+                                        : roomBoard ? *reinterpret_cast<const uintptr_t*>(roomBoard + ACTOR_MOTCTRL) : 0;
             if (SetHasMotion(set, static_cast<int>(motion))) {
+                if (!board) board = SpawnCloneBoard(index, actor, roomBoard);
                 *rideSet = set;
                 reinterpret_cast<PFN_PlayRideMotion>(g_exeBase + RVA_PLAY_RIDE_MOTION)(
                     reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), motion, 4.0f);
-                if (!d.riding) Log("[puppet %d] riding: motion %u from board %p", index, motion, reinterpret_cast<void*>(board));
-                LendBoard(board, index);
-                if (g_boardLoan.board == board) {
+                if (!d.riding) Log("[puppet %d] riding: motion %u, board %p", index, motion, reinterpret_cast<void*>(board));
+                if (board) {
+                    g_cloneBoards[index].ridden = true;
                     const int boardMotion = static_cast<int>(motion) - BOARD_MOTION_OFFSET;
                     if (SetHasMotion(set, boardMotion))
                         g_setAnimationUnderlying(reinterpret_cast<void*>(board + ACTOR_MOTCTRL), boardMotion, 4.0f, 0.0f);
-                    PlaceLentBoard(actor);
+                    PlaceCloneBoard(index, actor);
                 }
                 d.riding = true;
                 d.lastAnim = static_cast<int>(motion);
@@ -4331,7 +4350,7 @@ static void DrivePuppetMotion(void* actorObj, int index) {
             *rideSet = 0;
             d.riding = false;
             d.lastAnim = -1; // rebind the next clip from the clone's own set
-            if (g_boardLoan.puppet == index) ReturnLentBoard("ride ended");
+            g_cloneBoards[index].ridden = false; // the board stays where the clone got off
             Log("[puppet %d] riding ended (motion %u)", index, motion);
         }
     }
@@ -5164,9 +5183,10 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             }
             ApplyPuppetTransform(actorObj, puppet);
             UpdatePauseTag(reinterpret_cast<uintptr_t>(actorObj), puppet);
-        } else if (g_boardLoan.board && reinterpret_cast<uintptr_t>(actorObj) == g_boardLoan.board &&
-                   g_boardLoan.puppet >= 0 && g_puppets[g_boardLoan.puppet].riding) {
-            PlaceLentBoard(g_puppets[g_boardLoan.puppet].actor); // the board updated after its clone
+        } else if ((g_cloneBoards[0].ridden && reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[0].actor) ||
+                   (g_cloneBoards[1].ridden && reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[1].actor)) {
+            const int b = reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[0].actor ? 0 : 1;
+            PlaceCloneBoard(b, g_puppets[b].actor); // the board updated after its clone
         } else if (savedFriendSlot != 0) {
             // Re-inject movement input after physics overwrites.
             // The motion controller tick (FUN_1403c6740) has already run
