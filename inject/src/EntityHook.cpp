@@ -4173,9 +4173,14 @@ static void SkateDiag(const char* who, uintptr_t actor, uint32_t motion) {
         char boardName[32] = "-";
         if (board > 0x10000) ActorName(board, boardName);
         const int idx = g_motionIndex ? g_motionIndex(reinterpret_cast<void*>(actor + ACTOR_MOTCTRL), static_cast<int>(motion)) : -2;
-        Log("[skate] %s actor=%p obj='%s' mset='%s' set0=%p set1=%p board=%p '%s' motion %u -> %d",
+        // 0x3C7190 plays a ridden motion from the set at actor+0x2B8 (the board's, set while riding).
+        const uintptr_t ride = *reinterpret_cast<const uintptr_t*>(actor + 0x2B8);
+        uintptr_t boardSet = 0;
+        if (board > 0x10000) boardSet = *reinterpret_cast<const uintptr_t*>(board + ACTOR_MOTCTRL);
+        Log("[skate] %s actor=%p obj='%s' mset='%s' set0=%p set1=%p ride=%p board=%p '%s' boardSet0=%p motion %u -> %d cur=%d",
             who, reinterpret_cast<void*>(actor), name, mset, reinterpret_cast<void*>(ctl[0]),
-            reinterpret_cast<void*>(ctl[1]), reinterpret_cast<void*>(board), boardName, motion, idx);
+            reinterpret_cast<void*>(ctl[1]), reinterpret_cast<void*>(ride), reinterpret_cast<void*>(board), boardName,
+            reinterpret_cast<void*>(boardSet), motion, idx, *reinterpret_cast<const int*>(actor + 0x180));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("[skate] %s: exception reading actor %p", who, reinterpret_cast<void*>(actor));
     }
