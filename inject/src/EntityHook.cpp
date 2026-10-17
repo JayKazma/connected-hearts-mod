@@ -2562,6 +2562,7 @@ static uint64_t __fastcall HookedTrigger(int a, int b) {
 // talking to its NPC ends in 0x3A3140, which starts it (intro scene, timer, counters). Shared as a
 // trigger with this sentinel; a game whose mission already started in this room is left alone.
 static constexpr int32_t kMissionStart = 0x7FFF0001;
+static constexpr uint8_t kWorldMap = 0x0F; // entering the world map starts its own mission object in each game
 static constexpr uintptr_t RVA_MISSION_START = 0x3A3140, RVA_MISSION = 0x2A0FF68;
 static constexpr uint8_t kMissionStartBytes[] = {0x48, 0x8B, 0x0D, 0x21, 0xCE, 0x66, 0x02, 0x48, 0x85, 0xC9, 0x0F, 0x85};
 using MissionStartFn = void(__fastcall*)();
@@ -2573,8 +2574,10 @@ static void __fastcall HookedMissionStart() {
     __try { mission = Read<uintptr_t>(RVA_MISSION); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     g_origMissionStart();
     if (!mission) return;
-    g_missionStartedLoad = warp::LoadSerial();
+    // Started during a room load (the world map does): it belongs to the load about to complete.
+    g_missionStartedLoad = warp::LoadSerial() + (warp::LoadPending() ? 1u : 0u);
     if (g_replayingTrigger) return;
+    if (Read<uint8_t>(offsets::WORLD_ID) == kWorldMap) return; // a static in the exe image
     __try {
         ++g_trigSeq; g_trigA = kMissionStart; g_trigB = 0; g_trigLoc = ReadLoc();
         Log("[cutscene] mission started at %02X/%02X evt %u; telling the other player (trigger %u)", g_trigLoc.world, g_trigLoc.room, g_trigLoc.evt, g_trigSeq);
@@ -2602,6 +2605,10 @@ static bool ApplyPeerTrigger(ULONGLONG now) {
         if (now <= g_trigDeadline) return false; // the host's room announcement may still be on its way
         Log("[cutscene] the other player's trigger %u is for %02X/%02X evt %u; this game is at %02X/%02X evt %u, not fired",
             g_peer.trigSeq, g_peer.trigWorld, g_peer.trigRoom, g_peer.trigEvt, here.world, here.room, here.evt);
+        return true;
+    }
+    if (g_peer.trigA == kMissionStart && here.world == kWorldMap) {
+        Log("[cutscene] the other player's mission %u is the world map's own; not started again", g_peer.trigSeq);
         return true;
     }
     if (g_peer.trigA == kMissionStart) return g_origMissionStart ? ApplyPeerMission(now) : true;
