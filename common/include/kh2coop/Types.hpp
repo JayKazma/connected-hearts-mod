@@ -204,6 +204,16 @@ struct AvatarState {
     std::uint8_t trigWorld {0};
     std::uint8_t trigRoom {0};
     std::uint16_t trigEvt {0};
+    // v19: a shared field object (the ball you can hit around Twilight Town). ballSeq is the owner's
+    // newest claim (it changes each time this player's hit starts the ball moving); the player with
+    // the newer claim owns the ball and the other game follows it. ballState: 0 none here, 1 moving,
+    // 2 resting. ballWorld/ballRoom: where it is.
+    std::uint16_t ballSeq {0};
+    std::uint8_t ballState {0};
+    std::uint8_t ballWorld {0};
+    std::uint8_t ballRoom {0};
+    Vec3 ballPos {};
+    Vec3 ballVel {};
 };
 
 struct InputButtons {

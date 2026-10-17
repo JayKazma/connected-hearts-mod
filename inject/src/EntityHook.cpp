@@ -3297,8 +3297,8 @@ static bool UpdatePuppetSuspension() {
 }
 
 static void PollPuppetPoses() {
-    fieldobj::Tick(g_frameCounter); // once per frame, like this
     const bool suspended = UpdatePuppetSuspension();
+    fieldobj::Tick(g_frameCounter, warp::LoadSerial(), !suspended && !LocalPaused()); // once per frame, like this
     if (suspended || !hud::ValidAuthority(enemysync::CapturePuppetAuthority()))
         render::InvalidateCoopHud();
     if (!g_avatarBridge.IsOpen()) return;
@@ -3315,6 +3315,7 @@ static void PollPuppetPoses() {
         kh2coop::PuppetPose pose;
         if (g_avatarBridge.TryReadPuppet(i, pose)) {
             cutscenesync::NotePeer(i, pose);
+            if (i == 0) fieldobj::NotePeer(pose.peer, pose.peerValid != 0);
             if (!suspended && pose.active && ValidPuppetProvenance(pose.provenance,
                     static_cast<std::uint8_t>(pose.pose.ownerSlot), i, enemysync::CapturePuppetAuthority())) {
                 driver.pose = pose;
@@ -5321,6 +5322,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             clonecast::Stamp(avatar);
             clonewpn::Stamp(avatar);
             cutscenesync::Stamp(avatar);
+            fieldobj::Stamp(avatar);
             // VUH-1513: only with a kit requested does the roster byte report the
             // actual native player kit; default off keeps captureAvatar's value.
             if (playerkit::KitRequested()) avatar.character = playerkit::StreamRoster(g_soraActor); // party kits: chosen kit

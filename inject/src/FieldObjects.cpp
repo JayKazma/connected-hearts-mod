@@ -107,19 +107,139 @@ void Follow(Track& t, std::uint32_t frame) {
     std::memcpy(t.last, p, sizeof(p));
     if (!t.moving) SafeCopy(t.snap, reinterpret_cast<const void*>(t.actor + SNAP_FROM), SNAP);
 }
+// ---- shared ball
+constexpr std::uint32_t kBallIds[] = {0x2FC}; // F_TT020, the Twilight Town ball (Tram Common 02/06)
+constexpr std::uintptr_t BALL_VEL = 0x6E0;    // transform +0xA0: x, y, z velocity per frame
+constexpr float kHitDelta = 4.0f;             // a velocity change this large while following = a local hit
+bool g_ballOn = false;
+std::uintptr_t g_ball = 0;
+std::uint32_t g_ballLoad = 0;
+std::uint16_t g_mySeq = 0;
+bool g_driving = false, g_myMoving = false, g_hadBall = false;
+float g_written[3] {}, g_lastBall[3] {};
+std::uint32_t g_lastMoveFrame = 0, g_frame = 0;
+AvatarState g_peer {};
+ULONGLONG g_peerMs = 0;
+bool g_peerValid = false;
+struct BallOut { std::uint8_t state, world, room; float pos[3], vel[3]; };
+BallOut g_out {};
+unsigned g_ballLogged = 0;
+bool BallLog() { return g_log && g_ballLogged < 200 && ++g_ballLogged; }
+
+bool IsBall(std::uintptr_t actor) {
+    std::uint32_t handle = 0, id = 0;
+    if (!Read(actor + ACTOR_OBJENTRY_HANDLE, handle)) return false;
+    const std::uintptr_t oe = g_resolve(handle);
+    if (oe < 0x10000 || !Read(oe + OBJENTRY_ID, id)) return false;
+    for (std::uint32_t b : kBallIds) if (id == b) return true;
+    return false;
+}
+float Dist(const float* a, const float* b) {
+    const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    return std::sqrt(x * x + y * y + z * z);
+}
+bool WriteBall(const float* pos, const float* vel) {
+    return SafeStore(reinterpret_cast<void*>(g_ball + ACTOR_TRANSFORM + TRANSFORM_POS), pos, 12) &&
+           SafeStore(reinterpret_cast<void*>(g_ball + BALL_VEL), vel, 12);
+}
+
+void BallTick(std::uint32_t frame, std::uint32_t loadSerial, bool gameplay, std::uint8_t w, std::uint8_t r) {
+    g_frame = frame;
+    if (loadSerial != g_ballLoad) { g_ballLoad = loadSerial; g_ball = 0; g_driving = false; g_myMoving = false; }
+    if (g_ball && !IsBall(g_ball)) g_ball = 0;
+    if (!g_ball && gameplay) {
+        std::uintptr_t a = 0;
+        if (Read(g_base + LIST_HEAD, a))
+            for (int guard = 0; a && guard < 256; ++guard) {
+                if (IsBall(a)) { g_ball = a; break; }
+                std::uint32_t next = 0;
+                if (!Read(a + ACTOR_NEXT, next)) break;
+                a = next ? g_resolve(next) : 0;
+            }
+        if (g_ball) {
+            ReadPos(g_ball, g_lastBall);
+            if (BallLog()) g_log("[ball] found in %02X/%02X: actor %p at (%.1f,%.1f,%.1f)", w, r, reinterpret_cast<void*>(g_ball), g_lastBall[0], g_lastBall[1], g_lastBall[2]);
+        }
+    }
+    if (!g_ball || !gameplay) { g_out.state = 0; g_driving = false; return; }
+    float p[3], v[3] {};
+    if (!ReadPos(g_ball, p) || !SafeCopy(v, reinterpret_cast<const void*>(g_ball + BALL_VEL), 12)) { g_ball = 0; g_out.state = 0; return; }
+    const bool movedNow = Dist(p, g_lastBall) > 0.3f;
+    const bool peerHere = g_peerValid && GetTickCount64() - g_peerMs < 500 && g_peer.ballState != 0 &&
+                          g_peer.ballWorld == w && g_peer.ballRoom == r;
+    // A tie (both claimed from the same number) goes to the host.
+    const bool peerIsHost = g_peer.ownerSlot == SlotType::Player;
+    const bool peerOwns = peerHere && (g_peer.ballSeq > g_mySeq || (g_peer.ballSeq == g_mySeq && g_mySeq != 0 && peerIsHost));
+    if (peerOwns) {
+        const float dv[3] = {v[0] - g_written[0], v[1] - g_written[1], v[2] - g_written[2]};
+        const bool hitWhileFollowing = g_driving && std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]) > kHitDelta;
+        const bool hitAtRest = !g_driving && movedNow && g_peer.ballState == 2;
+        if (hitWhileFollowing || hitAtRest) {
+            g_mySeq = static_cast<std::uint16_t>(g_peer.ballSeq + 1);
+            g_driving = false; g_myMoving = true; g_lastMoveFrame = frame;
+            if (BallLog()) g_log("[ball] frame %u hit here; this player owns it now (claim %u)", frame, g_mySeq);
+        } else if (g_peer.ballState == 1) {
+            const float pp[3] = {g_peer.ballPos.x, g_peer.ballPos.y, g_peer.ballPos.z};
+            const float pv[3] = {g_peer.ballVel.x, g_peer.ballVel.y, g_peer.ballVel.z};
+            if (!g_driving && BallLog()) g_log("[ball] frame %u following the other player's ball (claim %u)", frame, g_peer.ballSeq);
+            WriteBall(pp, pv); std::memcpy(g_written, pv, 12); std::memcpy(p, pp, 12);
+            g_driving = true; g_myMoving = false;
+        } else { // resting there: put it where it stopped once, then leave it
+            const float pp[3] = {g_peer.ballPos.x, g_peer.ballPos.y, g_peer.ballPos.z};
+            if (g_driving || Dist(p, pp) > 1.0f) {
+                const float zero[3] {};
+                WriteBall(pp, zero); std::memcpy(p, pp, 12);
+                if (BallLog()) g_log("[ball] frame %u the other player's ball stopped at (%.1f,%.1f,%.1f)", frame, pp[0], pp[1], pp[2]);
+            }
+            g_driving = false; g_myMoving = false;
+        }
+    } else {
+        g_driving = false;
+        if (movedNow && !g_myMoving) { // our hit (or nothing shared yet): claim it
+            const std::uint16_t base = g_peerValid && g_peer.ballSeq > g_mySeq ? g_peer.ballSeq : g_mySeq;
+            g_mySeq = static_cast<std::uint16_t>(base + 1);
+            if (BallLog()) g_log("[ball] frame %u moving here (claim %u)", frame, g_mySeq);
+        }
+        if (movedNow) { g_myMoving = true; g_lastMoveFrame = frame; }
+        else if (g_myMoving && frame - g_lastMoveFrame > 20) g_myMoving = false;
+    }
+    std::memcpy(g_lastBall, p, 12);
+    g_out.world = w; g_out.room = r;
+    g_out.state = g_driving ? 1 : (g_myMoving ? 1 : 2);
+    std::memcpy(g_out.pos, p, 12);
+    if (!g_driving) std::memcpy(g_out.vel, v, 12);
+}
 } // namespace
+
+void Stamp(AvatarState& a) {
+    if (!g_ballOn) return;
+    a.ballSeq = g_mySeq; a.ballState = g_out.state; a.ballWorld = g_out.world; a.ballRoom = g_out.room;
+    a.ballPos = {g_out.pos[0], g_out.pos[1], g_out.pos[2]};
+    a.ballVel = {g_out.vel[0], g_out.vel[1], g_out.vel[2]};
+}
+
+void NotePeer(const AvatarState& peer, bool valid) {
+    if (!g_ballOn) return;
+    g_peerValid = valid;
+    if (!valid) return;
+    g_peer = peer;
+    g_peerMs = GetTickCount64();
+}
 
 void Install(std::uintptr_t exeBase, LogFn log, ResolveFn resolve) {
     char v[2] {};
     g_on = !(GetEnvironmentVariableA("KH2COOP_FIELDOBJ_DIAG", v, 2) == 1 && v[0] == '0') && resolve;
     g_base = exeBase; g_log = log; g_resolve = resolve;
     if (log) log(g_on ? "[fieldobj] diagnostics on: field objects listed per room, moving ones followed" : "[fieldobj] diagnostics off");
+    g_ballOn = !(GetEnvironmentVariableA("KH2COOP_BALL_SYNC", v, 2) == 1 && v[0] == '0') && resolve;
+    if (log) log(g_ballOn ? "[ball] sync on: the Twilight Town ball follows whoever hit it last" : "[ball] sync off");
 }
 
-void Tick(std::uint32_t frame) {
-    if (!g_on) return;
+void Tick(std::uint32_t frame, std::uint32_t loadSerial, bool gameplay) {
     std::uint8_t w = 0, r = 0;
     if (!Read(g_base + WORLD_ID, w) || !Read(g_base + ROOM_ID, r)) return;
+    if (g_ballOn) BallTick(frame, loadSerial, gameplay, w, r);
+    if (!g_on) return;
     const std::uint16_t room = static_cast<std::uint16_t>((w << 8) | r);
     if (room != g_room) { g_room = room; g_count = 0; }
     std::uintptr_t a = 0;

@@ -704,6 +704,12 @@ void write(ByteWriter& w, const AvatarState& a) {
     w.writeU8(a.trigWorld);
     w.writeU8(a.trigRoom);
     w.writeU16(a.trigEvt);
+    w.writeU16(a.ballSeq);
+    w.writeU8(a.ballState);
+    w.writeU8(a.ballWorld);
+    w.writeU8(a.ballRoom);
+    write(w, a.ballPos);
+    write(w, a.ballVel);
 }
 
 void write(ByteWriter& w, const ClockPing& p) { w.writeU64(p.clientSendMs); }
@@ -1138,6 +1144,12 @@ void read(ByteReader& r, AvatarState& a) {
     a.trigWorld = r.readU8();
     a.trigRoom = r.readU8();
     a.trigEvt = r.readU16();
+    a.ballSeq = r.readU16();
+    a.ballState = r.readU8();
+    a.ballWorld = r.readU8();
+    a.ballRoom = r.readU8();
+    read(r, a.ballPos);
+    read(r, a.ballVel);
 }
 
 void read(ByteReader& r, ClockPing& p) { p.clientSendMs = r.readU64(); }
