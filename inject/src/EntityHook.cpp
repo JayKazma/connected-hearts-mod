@@ -4241,15 +4241,29 @@ static bool CloneBoardUsable(int i) {
     }
     return true;
 }
+static bool EntryOrHook(uintptr_t rva, const uint8_t* bytes, size_t size) {
+    const auto* at = reinterpret_cast<const uint8_t*>(g_exeBase + rva);
+    return std::memcmp(at, bytes, size) == 0 || at[0] == 0xE9 || (at[0] == 0xFF && at[1] == 0x25);
+}
 static uintptr_t SpawnCloneBoard(int i, uintptr_t clone, uintptr_t roomBoard) {
     if (g_createActorOk < 0) {
-        g_createActorOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_CREATE_ACTOR), kCreateActorBytes, sizeof(kCreateActorBytes)) == 0 &&
-                          std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_ACTOR_RECORD_INIT), kRecordInitBytes, sizeof(kRecordInitBytes)) == 0 ? 1 : 0;
+        // The factory is hooked by privatestatus (its prologue is then a jump): calling the entry still runs
+        // the game's code through that hook, as the game's own callers do.
+        g_createActorOk = EntryOrHook(RVA_CREATE_ACTOR, kCreateActorBytes, sizeof(kCreateActorBytes)) &&
+                          EntryOrHook(RVA_ACTOR_RECORD_INIT, kRecordInitBytes, sizeof(kRecordInitBytes)) ? 1 : 0;
         if (!g_createActorOk) Log("[puppet] clone boards off: bytes at 0x3DF930/0x3B4BD0 don't match");
     }
     if (g_createActorOk != 1 || !roomBoard) return 0;
     const uintptr_t objentry = *reinterpret_cast<const uintptr_t*>(roomBoard + offsets::actor::OBJENTRY_PTR);
     const uint32_t objId = *reinterpret_cast<const uint32_t*>(objentry + offsets::objentry::OBJECT_ID);
+    // The factory's own admission (0x3A1F00): weight (objentry +0x54) <= limit (0x2A0F7DC) - used (0x2A0F830).
+    const uint8_t weight = *reinterpret_cast<const uint8_t*>(objentry + 0x54);
+    const float limit = *reinterpret_cast<const float*>(g_exeBase + 0x2A0F7DC), used = *reinterpret_cast<const float*>(g_exeBase + 0x2A0F830);
+    if (static_cast<float>(weight) > limit - used) {
+        static uint32_t loggedAt = 0;
+        if (g_frameCounter - loggedAt > 600) { loggedAt = g_frameCounter; Log("[puppet %d] no clone board: room object budget full (%.1f/%.1f, weight %u)", i, used, limit, weight); }
+        return 0;
+    }
     const float* at = EntityField(clone, offsets::entity::POS_X);
     const float pos[4] = {at[0], at[1], at[2], 0.0f};
     const uintptr_t board = reinterpret_cast<PFN_CreateActor>(g_exeBase + RVA_CREATE_ACTOR)(objId, pos, 0.0f);
