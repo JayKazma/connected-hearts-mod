@@ -5198,8 +5198,10 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
 
     // Always call original — even if our logic crashed, the game must continue.
     int savedFriendSlot = g_currentFriendSlot;
-    g_postStage = 0;
     g_origPerEntityUpdate(actorObj);
+    // A store between the call and the __try: the call's return address must not fall inside the
+    // guarded range, or a fault in the game's own update would be caught as ours.
+    g_postStage = 0;
 
     // POST-UPDATE overrides — run after g_origPerEntityUpdate has finished.
     // This is AFTER the motion controller tick (FUN_1403c6740) which writes

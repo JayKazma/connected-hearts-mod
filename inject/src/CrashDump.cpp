@@ -71,6 +71,29 @@ void Describe(const void* p, char* out, size_t n) {
 LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* info) {
     if (!info || !info->ExceptionRecord || !g_log) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = info->ExceptionRecord->ExceptionCode;
+    // Other codes (C++ throws, RaiseException): one line each, the first 24, to find what started a chain.
+    static volatile LONG others = 0;
+    if (code != 0x406D1388 && code != 0x40010006 && code != 0x4001000A && code != EXCEPTION_BREAKPOINT &&
+        code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW && InterlockedIncrement(&others) <= 24) {
+        char where[MAX_PATH + 32]; Describe(info->ExceptionRecord->ExceptionAddress, where, sizeof(where));
+        char caller[MAX_PATH + 32] = "-";
+        if (info->ContextRecord) {
+            const auto* sp = reinterpret_cast<const uintptr_t*>(info->ContextRecord->Rsp);
+            for (unsigned i = 0; i < 64; ++i) {
+                uintptr_t v = 0;
+                __try { v = sp[i]; } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+                HMODULE m = nullptr;
+                if (v < 0x10000 || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(v), &m) || !m) continue;
+                char name[MAX_PATH] = "?"; GetModuleFileNameA(m, name, MAX_PATH);
+                if (!strstr(name, "KINGDOM HEARTS II") && !strstr(name, "connected_hearts")) continue;
+                Describe(reinterpret_cast<const void*>(v), caller, sizeof(caller)); break;
+            }
+        }
+        g_log("[crash] exception 0x%08lX at %s (first game frame %s) params=%lu p0=%p tid=%lu", code, where, caller,
+              info->ExceptionRecord->NumberParameters,
+              info->ExceptionRecord->NumberParameters > 0 ? reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[0]) : nullptr,
+              GetCurrentThreadId());
+    }
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
         code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_PRIV_INSTRUCTION && code != EXCEPTION_IN_PAGE_ERROR) return EXCEPTION_CONTINUE_SEARCH;
     if (InterlockedCompareExchange(&g_firstChance, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
