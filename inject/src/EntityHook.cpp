@@ -4207,7 +4207,8 @@ static bool SetHasMotion(uintptr_t set, int motion) {
 // back. The room's own board is never touched. A board the local player picks up becomes theirs.
 static constexpr uintptr_t RVA_CREATE_ACTOR = 0x3DF930, RVA_ACTOR_RECORD_INIT = 0x3B4BD0;
 static constexpr uintptr_t ACTOR_SPAWN_CONTEXT = 0x9E8, ACTOR_SPAWN_RECORD = 0x9F0;
-static constexpr uint8_t kCreateActorBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08};
+static constexpr uint8_t kCreateActorBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x40};
+static constexpr uint8_t kRecordInitBytes[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20};
 using PFN_CreateActor = uintptr_t(__fastcall*)(uint64_t objId, const float* pos4, float rotY);
 using PFN_ActorRecordInit = void(__fastcall*)(uintptr_t actor, uintptr_t context, uintptr_t record);
 struct CloneBoard {
@@ -4242,8 +4243,9 @@ static bool CloneBoardUsable(int i) {
 }
 static uintptr_t SpawnCloneBoard(int i, uintptr_t clone, uintptr_t roomBoard) {
     if (g_createActorOk < 0) {
-        g_createActorOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_CREATE_ACTOR), kCreateActorBytes, sizeof(kCreateActorBytes)) == 0 ? 1 : 0;
-        if (!g_createActorOk) Log("[puppet] clone boards off: bytes at 0x3DF930 don't match");
+        g_createActorOk = std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_CREATE_ACTOR), kCreateActorBytes, sizeof(kCreateActorBytes)) == 0 &&
+                          std::memcmp(reinterpret_cast<const void*>(g_exeBase + RVA_ACTOR_RECORD_INIT), kRecordInitBytes, sizeof(kRecordInitBytes)) == 0 ? 1 : 0;
+        if (!g_createActorOk) Log("[puppet] clone boards off: bytes at 0x3DF930/0x3B4BD0 don't match");
     }
     if (g_createActorOk != 1 || !roomBoard) return 0;
     const uintptr_t objentry = *reinterpret_cast<const uintptr_t*>(roomBoard + offsets::actor::OBJENTRY_PTR);
