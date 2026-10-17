@@ -2329,10 +2329,12 @@ static bool IsSoraActor(uintptr_t actor) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+static void EquipNotes();
 static void Tick(int i, uintptr_t actor) {
     if (!g_enabled || !g_ready || actor == 0 || i < 0 || i > 1) return;
     if (!IsSoraActor(actor)) { if (g_pending.active && g_pending.puppet == i) Drop("the puppet points at a non-Sora actor"); return; }
     Diag(i, actor);
+    EquipNotes();
     {
         static uint32_t lastPeriodic = 0;
         const bool periodic = g_frameCounter - lastPeriodic >= 1800;
@@ -2392,6 +2394,90 @@ static void Tick(int i, uintptr_t actor) {
     }
 }
 
+// The player's own keyblade change (equip menu job 0x36AF80 -> 0x3D59C0(job, charId, slot, item)):
+// it destroys the player's weapon, releases its load group (0x39D010) and loads the new keyblade
+// there. A clone built with this machine's keyblade binds that same group's files, so the release
+// freed them under the clone's weapon and the clone's next update crashed (2026-10-16/17). Around
+// the change, each clone weapon bound to the player's group is destroyed first and rebuilt
+// afterwards from the new keyblade (the same group, as a clone spawns), the way 0x3D59C0 rebuilds
+// the player's. The change runs as a menu task and yields while loading; everything is re-checked
+// after it returns.
+static constexpr uintptr_t RVA_EQUIP_SWAP = 0x3D59C0;
+static constexpr uint8_t kEquipSwapBytes[] = {0x44, 0x89, 0x4C, 0x24, 0x20, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x53, 0x56, 0x57, 0x41, 0x54};
+static constexpr uintptr_t RVA_NATIVE_PLAYER_PTR = 0x2A105D0;
+using PFN_EquipSwap = void(__fastcall*)(uintptr_t job, int charId, int slot, int item);
+static PFN_EquipSwap g_origEquipSwap = nullptr;
+struct HeldClone { uintptr_t actor; uint8_t visible; };
+static volatile long g_equipDropped = 0, g_equipRebuilt = 0, g_equipFailed = 0; // logged from the game frame
+
+static bool CloneSora(uintptr_t actor) {
+    const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(actor + ACTOR_OBJENTRY));
+    return objentry >= 0x10000 && *reinterpret_cast<const uint16_t*>(objentry + OBJENTRY_CHAR_ID) == 1 &&
+           *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS) == 1;
+}
+// Before the change: destroy the clone weapons that share the player's group. Returns how many.
+static int DropSharedCloneWeapons(int slot, HeldClone* held) {
+    int n = 0;
+    __try {
+        const uintptr_t player = *reinterpret_cast<const uintptr_t*>(g_exeBase + RVA_NATIVE_PLAYER_PTR);
+        if (!player || !CloneSora(player)) return 0;
+        const uintptr_t mine = *reinterpret_cast<const uintptr_t*>(player + ACTOR_WEAPON_SLOTS + 8u * static_cast<unsigned>(slot));
+        if (!mine) return 0;
+        const int32_t group = *reinterpret_cast<const int32_t*>(mine + 0xC0C);
+        for (int i = 0; i < 2; ++i) {
+            const uintptr_t actor = PuppetTarget(i);
+            if (!actor || actor == player || !IsPuppetActive(i) || !CloneSora(actor)) continue;
+            auto* sp = reinterpret_cast<uintptr_t*>(actor + ACTOR_WEAPON_SLOTS + 8u * static_cast<unsigned>(slot));
+            const uintptr_t w = *sp;
+            if (!w || *reinterpret_cast<const int32_t*>(w + 0xC0C) != group) continue; // its own group: unaffected
+            const uint8_t visible = reinterpret_cast<PFN_CharP>(g_exeBase + RVA_WEAPON_VISIBLE)(w);
+            reinterpret_cast<PFN_VoidP>(g_exeBase + RVA_WEAPON_DESTROY)(w);
+            *sp = 0;
+            held[n++] = {actor, visible};
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_equipFailed = g_equipFailed + 1; }
+    return n;
+}
+// After the change: give each clone the player's new keyblade, bound like the player's.
+static void RebuildCloneWeapon(const HeldClone& h, int slot) {
+    __try {
+        const auto base = g_exeBase;
+        const uintptr_t player = *reinterpret_cast<const uintptr_t*>(base + RVA_NATIVE_PLAYER_PTR);
+        if (!player || !CloneAlive(h.actor) || !CloneSora(h.actor)) return;
+        auto* sp = reinterpret_cast<uintptr_t*>(h.actor + ACTOR_WEAPON_SLOTS + 8u * static_cast<unsigned>(slot));
+        if (*sp) return; // something rebuilt it already
+        const uintptr_t mine = *reinterpret_cast<const uintptr_t*>(player + ACTOR_WEAPON_SLOTS + 8u * static_cast<unsigned>(slot));
+        if (!mine) return;
+        const int32_t group = *reinterpret_cast<const int32_t*>(mine + 0xC0C);
+        const uintptr_t newEntry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(mine + ACTOR_OBJENTRY)); // the player's new keyblade
+        const uintptr_t objentry = g_resolveHandle(*reinterpret_cast<const uint32_t*>(h.actor + ACTOR_OBJENTRY));
+        if (newEntry < 0x10000 || objentry < 0x10000) return;
+        const int cls = *reinterpret_cast<const int16_t*>(objentry + OBJENTRY_WEAPON_CLASS);
+        const uintptr_t mem = reinterpret_cast<PFN_Alloc>(base + RVA_ALLOC)(0xC10);
+        if (!mem) return;
+        const uintptr_t w = reinterpret_cast<PFN_WeaponCreate>(base + RVA_WEAPON_CREATE)(mem, newEntry, h.actor, cls, slot, group);
+        *sp = w;
+        if (!w) return;
+        reinterpret_cast<PFN_BindA>(base + RVA_MOTION_BIND_A)(w + 0x158, *reinterpret_cast<const int32_t*>(h.actor + 0x188));
+        reinterpret_cast<PFN_BindB>(base + RVA_MOTION_BIND_B)(w + 0x158, *reinterpret_cast<const uint32_t*>(h.actor + 0x180), 0, *reinterpret_cast<const uint32_t*>(h.actor + 0x19C));
+        if (h.visible == 0) { const uintptr_t wt = TypeOf(w); if (wt) VFn<PFN_TypeShow>(wt, 0x88)(wt, w); }
+        g_equipRebuilt = g_equipRebuilt + 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_equipFailed = g_equipFailed + 1; }
+}
+static void __fastcall HookedEquipSwap(uintptr_t job, int charId, int slot, int item) {
+    HeldClone held[2] {};
+    const int n = charId == 1 && slot >= 0 && slot < 4 ? DropSharedCloneWeapons(slot, held) : 0;
+    g_equipDropped = g_equipDropped + n;
+    g_origEquipSwap(job, charId, slot, item);
+    for (int i = 0; i < n; ++i) RebuildCloneWeapon(held[i], slot);
+}
+static void EquipNotes() {
+    static long seen[3] {};
+    if (g_equipDropped == seen[0] && g_equipRebuilt == seen[1] && g_equipFailed == seen[2]) return;
+    seen[0] = g_equipDropped; seen[1] = g_equipRebuilt; seen[2] = g_equipFailed;
+    Log("[weapon] keyblade change: clone keyblades taken off %ld, rebuilt %ld, faults %ld (totals)", seen[0], seen[1], seen[2]);
+}
+
 static void Reset() {
     g_appliedActor[0] = g_appliedActor[1] = 0; g_appliedItem[0] = g_appliedItem[1] = 0; g_retryAt[0] = g_retryAt[1] = 0;
     g_bailedActor[0] = g_bailedActor[1] = 0;
@@ -2409,6 +2495,16 @@ static void Install(uintptr_t exeBase) {
             Log("[weapon] bytes at RVA 0x%llX don't match; weapon sync off", static_cast<unsigned long long>(s.rva));
             return;
         }
+    }
+    {
+        void* swap = reinterpret_cast<void*>(exeBase + RVA_EQUIP_SWAP);
+        MH_STATUS es = MH_UNKNOWN;
+        if (g_resolveHandle && std::memcmp(swap, kEquipSwapBytes, sizeof(kEquipSwapBytes)) == 0) {
+            es = MH_CreateHook(swap, reinterpret_cast<void*>(&HookedEquipSwap), reinterpret_cast<void**>(&g_origEquipSwap));
+            if (es == MH_OK) es = MH_EnableHook(swap);
+        }
+        Log(es == MH_OK ? "[weapon] keyblade change guard ready: clone keyblades sharing the player's files are rebuilt around the player's change (0x3D59C0)"
+                        : "[weapon] keyblade change guard unavailable (%d); changing keyblades with a clone present can crash", es);
     }
     void* find = reinterpret_cast<void*>(exeBase + RVA_RES_FIND);
     if (std::memcmp(find, kFindBytes, sizeof(kFindBytes)) != 0) { Log("[weapon] resource find bytes don't match; weapon sync off"); return; }
