@@ -1231,6 +1231,39 @@ void PausedHeartbeat() {
     }
     ReleaseSRWLockExclusive(&g_localPublishLock);
 }
+
+void WriteLocalStatus() {
+    if (g_exeBase == 0) return;
+    static ULONGLONG lastWrite = 0;
+    static char lastLine[192] {};
+    static wchar_t path[MAX_PATH] {};
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastWrite < 1000) return;
+    lastWrite = now;
+    if (!path[0]) {
+        wchar_t dir[MAX_PATH - 40] {};
+        const DWORD n = GetEnvironmentVariableW(L"KH2COOP_LOG_DIR", dir, MAX_PATH - 40);
+        if (n == 0 || n >= MAX_PATH - 40) { path[0] = L'-'; return; }
+        swprintf_s(path, L"%s\\status_%lu.txt", dir, GetCurrentProcessId());
+    }
+    if (path[0] == L'-') return;
+    AvatarState a {};
+    AcquireSRWLockExclusive(&g_localPublishLock);
+    const bool have = g_localAvatar.Last(a);
+    ReleaseSRWLockExclusive(&g_localPublishLock);
+    if (!have) return;
+    char line[192];
+    const int len = std::snprintf(line, sizeof(line), "lv=%u hp=%d/%d mp=%d/%d kb=%u world=%u room=%u paused=%d\r\n",
+                                  static_cast<unsigned>(a.level), a.hp, a.maxHp, a.mp, a.maxMp, static_cast<unsigned>(a.weaponItem),
+                                  static_cast<unsigned>(a.worldId), static_cast<unsigned>(a.roomId), LocalPaused() ? 1 : 0);
+    if (len <= 0 || std::strcmp(line, lastLine) == 0) return;
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(f, line, static_cast<DWORD>(len), &written, nullptr);
+    CloseHandle(f);
+    std::memcpy(lastLine, line, sizeof(lastLine));
+}
 } // namespace pausetag
 
 static void PublishCoopHud(const AvatarState& local, const PuppetAuthority& before) {

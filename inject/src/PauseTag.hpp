@@ -51,4 +51,9 @@ inline int Collect(Visible out[kSlots]) {
 // stopped publishing, repeat the last local pose marked AvatarPaused (~20 times a second).
 void PausedHeartbeat();
 
+// Render thread, every present (defined in EntityHook.cpp): this player's level, HP/MP, keyblade,
+// location and pause state in <log dir>\status_<pid>.txt, rewritten when it changes (at most once a
+// second), for the launcher's Discord status and cards when no session is running.
+void WriteLocalStatus();
+
 } // namespace kh2coop::inject::pausetag

@@ -48,6 +48,7 @@ public:
         a.flags = static_cast<std::uint8_t>(a.flags | AvatarPaused);
         return a;
     }
+    bool Last(AvatarState& out) const { if (have_) out = last_; return have_; }
     void Reset() { have_ = false; last_ = {}; }
 
 private:

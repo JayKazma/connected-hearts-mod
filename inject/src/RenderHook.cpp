@@ -1281,6 +1281,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
     StartJobIfRequested();
     PollCoopHud();
     pausetag::PausedHeartbeat(); // this game paused: keep its pose flowing to peers
+    pausetag::WriteLocalStatus(); // the launcher's Discord status and cards
 
     if (g_gpuFailed) FailJob(CaptureStatus::GpuError, L"renderer GPU work failed; restart required");
     if (ready && !g_gpuFailed) {
