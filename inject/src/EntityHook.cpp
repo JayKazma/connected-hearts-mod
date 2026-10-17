@@ -1186,6 +1186,16 @@ static bool IsPuppetActive(int index) {
 namespace clonewpn { static void Reset(); }
 // g_localAvatar and the local bridge slot have two writers: the game thread (every frame) and the
 // render thread (pausetag::PausedHeartbeat, only while the game has stopped updating).
+// Post-update fault report: which step (g_postStage) and where, for the log.
+static volatile long g_postStage = 0;
+static struct { unsigned long code; uintptr_t address, data; } g_postFault {};
+static int PostUpdateFilter(EXCEPTION_POINTERS* ep) {
+    const EXCEPTION_RECORD* r = ep->ExceptionRecord;
+    g_postFault.code = r->ExceptionCode;
+    g_postFault.address = reinterpret_cast<uintptr_t>(r->ExceptionAddress);
+    g_postFault.data = r->NumberParameters >= 2 ? static_cast<uintptr_t>(r->ExceptionInformation[1]) : 0;
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 static SRWLOCK g_localPublishLock = SRWLOCK_INIT;
 static std::atomic<ULONGLONG> g_lastGamePublishMs {0};
 static void PublishLocalForTransition() {
@@ -5181,6 +5191,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
 
     // Always call original — even if our logic crashed, the game must continue.
     int savedFriendSlot = g_currentFriendSlot;
+    g_postStage = 0;
     g_origPerEntityUpdate(actorObj);
 
     // POST-UPDATE overrides — run after g_origPerEntityUpdate has finished.
@@ -5195,6 +5206,7 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             const bool inEvent =
                 *reinterpret_cast<const std::int32_t*>(g_exeBase + offsets::CUTSCENE_STATE) != 0 ||
                 *reinterpret_cast<const uintptr_t*>(g_exeBase + offsets::EVENT_CONTEXT) != 0;
+            g_postStage = 1;
             const auto hudAuthority = enemysync::CapturePuppetAuthority();
             AvatarState avatar = captureAvatar(DirectMemory {}, g_exeBase, g_soraActor,
                                                inEvent, false);
@@ -5215,11 +5227,13 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
                 }
             }
             // VUH-1787: an own room load stops this stream; flag it so peers hide, not hold.
+            g_postStage = 2;
             AcquireSRWLockExclusive(&g_localPublishLock);
             avatar = g_localAvatar.Captured(avatar, warp::LoadPending());
             g_avatarBridge.PublishLocal(avatar);
             ReleaseSRWLockExclusive(&g_localPublishLock);
             g_lastGamePublishMs.store(GetTickCount64(), std::memory_order_relaxed);
+            g_postStage = 3;
             PublishCoopHud(avatar, hudAuthority);
         }
 
@@ -5228,19 +5242,24 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             // Sora clones don't run the friend AI hook, so their motion is
             // set here; companions got theirs in HookedFriendAI.
             if (IsPlayerClassActor(reinterpret_cast<uintptr_t>(actorObj))) {
+                g_postStage = 4;
                 DrivePuppetMotion(actorObj, puppet);
             }
+            g_postStage = 5;
             ApplyPuppetTransform(actorObj, puppet);
+            g_postStage = 6;
             UpdatePauseTag(reinterpret_cast<uintptr_t>(actorObj), puppet);
         } else if ((g_cloneBoards[0].ridden && reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[0].actor) ||
                    (g_cloneBoards[1].ridden && reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[1].actor)) {
             const int b = reinterpret_cast<uintptr_t>(actorObj) == g_cloneBoards[0].actor ? 0 : 1;
+            g_postStage = 7;
             PlaceCloneBoard(b, g_puppets[b].actor); // the board updated after its clone
         } else if (savedFriendSlot != 0) {
             // Re-inject movement input after physics overwrites.
             // The motion controller tick (FUN_1403c6740) has already run
             // by this point, so our velocity/facing here gets the LAST WORD
             // before rendering.
+            g_postStage = 8;
             InjectMovementInput(actorObj, savedFriendSlot);
 
             // Animation is handled by the skip-AI approach in HookedFriendAI.
@@ -5256,9 +5275,13 @@ static void __fastcall HookedPerEntityUpdate(void* actorObj) {
             reinterpret_cast<uintptr_t>(actorObj) == g_soraActor) {
             SuppressSoraMovement();
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    } __except (PostUpdateFilter(GetExceptionInformation())) {
         render::InvalidateCoopHud();
-        Log("EXCEPTION in post-update override");
+        const uintptr_t at = g_postFault.address;
+        Log("EXCEPTION in post-update override: stage %ld code %08lX at %p (exe+0x%llX) data %p actor %p", g_postStage,
+            g_postFault.code, reinterpret_cast<void*>(at),
+            static_cast<unsigned long long>(at >= g_exeBase && at - g_exeBase < 0x4000000 ? at - g_exeBase : 0),
+            reinterpret_cast<void*>(g_postFault.data), actorObj);
     }
     // VUH-1515 step 2: final pose/motion for a driven mirrored enemy (default off).
     __try {
