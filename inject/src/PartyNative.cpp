@@ -530,6 +530,11 @@ bool NeutralReady() { return g_neutralProbe && g_neutralProbe(); }
 // call (slot 1 aside). Armed by the observer for the load it applied, disarmed at the next load.
 std::atomic<bool> g_forcedSeatEnabled {false};
 std::atomic<int> g_forceWorld {-1};
+// Row slots the copy changes for the armed load: slot 1 = Donald's selector (forced seat), and
+// g_blankSlot = 0x12 (no companion: the native Donald/Goofy left beside the clone stays off the field).
+std::atomic<bool> g_forceSeat1 {false};
+std::atomic<int> g_blankSlot {-1};
+bool g_noCompanion = true; // KH2COOP_NO_COMPANION=0 keeps the native companion
 std::uint8_t g_forcedRow[4] {}, g_forcedIssued[4] {};
 constexpr std::uint64_t RVA_ROW_GETTER = 0x3E2E20;
 constexpr std::uint8_t kRowGetterBytes[] = {0x85, 0xC9, 0x79, 0x07, 0x0F, 0xB6, 0x0D, 0xDD, 0x41, 0x33, 0x00, 0x48, 0x63, 0xC1};
@@ -542,9 +547,13 @@ std::uint8_t* __fastcall HookedRowGetter(int world) {
     __try {
         const int w = world < 0 ? *reinterpret_cast<const std::uint8_t*>(g_base + 0x717008) : world;
         if (w != forced) return real;
-        for (int s = 0; s < 4; ++s) if (s != 1 && g_forcedRow[s] != g_forcedIssued[s]) real[s] = g_forcedRow[s];
+        const bool seat1 = g_forceSeat1.load(std::memory_order_acquire);
+        const int blank = g_blankSlot.load(std::memory_order_acquire);
+        for (int s = 0; s < 4; ++s)
+            if (!(s == 1 && seat1) && s != blank && g_forcedRow[s] != g_forcedIssued[s]) real[s] = g_forcedRow[s];
         std::memcpy(g_forcedRow, real, 4);
-        g_forcedRow[1] = 1; // Donald's selector: its member holds the clone
+        if (seat1) g_forcedRow[1] = 1; // Donald's selector: its member holds the clone
+        if (blank >= 1 && blank <= 2) g_forcedRow[blank] = 0x12; // no one in that field slot
         std::memcpy(g_forcedIssued, g_forcedRow, 4);
         return g_forcedRow;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return real; }
@@ -639,7 +648,19 @@ void Observer(std::uint16_t* resolved, const playerkit::LoadContext& c) {
         // The prologue's player is Roxas: the clone is then a second Roxas (forced seat mode only).
         in.roxasLocal = g_forcedSeatEnabled.load(std::memory_order_acquire) && !KitsActive() && in.resolved[0] == ROXAS;
         r = ApplyAfterResolve(in, resolved, g_original);
-        if (r == Load::Applied && in.forcedSeat) g_forceWorld.store(in.world, std::memory_order_release);
+        // No companion: the row slot (1 or 2) holding the native Donald/Goofy that the clone did not
+        // replace is emptied in the row copy for this load. Guests stay (story scripts expect them).
+        int blank = -1;
+        if (r == Load::Applied && in.plan == Plan::OneClone && g_noCompanion) {
+            const unsigned idx = OneCloneIndex(in);
+            const std::uint8_t cloneSel = idx == 1 ? 1 : 2, otherSel = idx == 1 ? 2 : 1;
+            for (int slot = 1; slot <= 2; ++slot)
+                if (in.row[slot] == otherSel && !(in.forcedSeat && slot == 1) && in.row[slot] != cloneSel) blank = slot;
+        }
+        g_forceSeat1.store(r == Load::Applied && in.forcedSeat, std::memory_order_release);
+        g_blankSlot.store(blank, std::memory_order_release);
+        if (r == Load::Applied && (in.forcedSeat || blank >= 0)) g_forceWorld.store(in.world, std::memory_order_release);
+        in.blankSlot = static_cast<std::int8_t>(blank);
         ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_original = {};
@@ -664,6 +685,7 @@ void Observer(std::uint16_t* resolved, const playerkit::LoadContext& c) {
 void ObserverLog(playerkit::LogFn log) {
     if (!log || !g_requested.load(std::memory_order_acquire)) return;
     const auto& in = g_lastIn;
+    if (in.blankSlot >= 0) log("[partynative] no companion: row slot %d left empty for this load (the clone stands in its place)", in.blankSlot);
     log("[partynative] load%s%s world=%u room=%u evt=%u eventCtx=%d cutscene=%d private=%u neutral=%u intent=%02X/%02X/%u row=%02X/%02X/%02X/%02X native=0x%X/0x%X/0x%X plan=%s result=%s set=0x%X/0x%X loads=%u applied=%u source=%s misses=%u",
         in.forcedSeat ? " forced-seat" : "", in.roxasLocal ? " roxas" : "",
         in.world, in.room, in.evtProgram, in.eventContext != 0, in.cutsceneState, in.privateStatusReady ? 1u : 0u,
@@ -710,16 +732,21 @@ bool Install(std::uintptr_t exeBase, LogFn log) {
         if (log) log("[partynative] party kits: each seat shows its owner's chosen kit (a qualified kit of the PlayerKits table); local kit %s",
                      flags.kit ? "from KH2COOP_PLAYER_KIT (checked by PlayerKit)" : "Sora 0x54");
     }
-    if (Enabled("KH2COOP_FORCED_SEAT")) {
+    { char v[2] {}; g_noCompanion = !(GetEnvironmentVariableA("KH2COOP_NO_COMPANION", v, 2) == 1 && v[0] == '0'); }
+    if (Enabled("KH2COOP_FORCED_SEAT") || g_noCompanion) {
         void* getter = reinterpret_cast<void*>(exeBase + RVA_ROW_GETTER);
         MH_STATUS st = MH_UNKNOWN;
         if (std::memcmp(getter, kRowGetterBytes, sizeof(kRowGetterBytes)) == 0) {
             st = MH_CreateHook(getter, reinterpret_cast<void*>(&HookedRowGetter), reinterpret_cast<void**>(&g_origRowGetter));
             if (st == MH_OK) st = MH_EnableHook(getter);
         }
-        g_forcedSeatEnabled.store(st == MH_OK, std::memory_order_release);
-        if (log) log(st == MH_OK ? "[partynative] forced seat on: rooms with no friend seat get one for the other player (row getter 0x3E2E20)"
-                                 : "[partynative] forced seat unavailable (row getter bytes or hook failed: %d)", st);
+        const bool forced = Enabled("KH2COOP_FORCED_SEAT");
+        g_forcedSeatEnabled.store(st == MH_OK && forced, std::memory_order_release);
+        if (st != MH_OK) g_noCompanion = false; // the row copy is how the companion is left out
+        if (log && forced) log(st == MH_OK ? "[partynative] forced seat on: rooms with no friend seat get one for the other player (row getter 0x3E2E20)"
+                                           : "[partynative] forced seat unavailable (row getter bytes or hook failed: %d)", st);
+        if (log) log(g_noCompanion ? "[partynative] no companion: the Donald/Goofy beside the other player's clone stays off the field (KH2COOP_NO_COMPANION=0 keeps them)"
+                                   : "[partynative] no companion off");
     }
     playerkit::SetResolveObserver(&Observer, &ObserverLog);
     g_requested.store(true, std::memory_order_release);

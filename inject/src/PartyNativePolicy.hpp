@@ -181,6 +181,7 @@ struct LoadInput {
     // Forced seat: the row has no friend seat; the load is decided as if row slot 1 held Donald's
     // selector, and the row getter (0x3E2E20) returns that row for this world while it is applied.
     bool forcedSeat = false;
+    std::int8_t blankSlot = -1; // no companion: the row slot emptied for this load (log only)
     // One clone with party kits off: member 0 as resolved is this machine's player (Sora, or Roxas in
     // the prologue); the clone is a copy of it.
     bool roxasLocal = false;
