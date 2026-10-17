@@ -28,7 +28,7 @@ bool decode(std::span<const std::uint8_t>b,std::uint64_t seq,Frame& f){
 }
 bool Broker::emit(Frame f){if(out_.size()>=MaxQueue)return fail("ipc-output-overflow");out_.push_back(std::move(f));return true;}
 bool Broker::fail(const char* why){stop();failed_=true;out_.clear();Frame f{Op::Error};f.bytes.assign(why,why+std::char_traits<char>::length(why));out_.push_back(std::move(f));return false;}
-void Broker::stop(){for(const auto& [id,p]:peers_){(void)id;api_.close(p.handle,false);}peers_.clear();if(listener_)api_.closeListener(listener_);listener_=0;configured_=false;allowed_.clear();admitted_.clear();target_=0;}
+void Broker::stop(){for(const auto& [id,p]:peers_){(void)id;api_.close(p.handle,false);}peers_.clear();if(listener_)api_.closeListener(listener_);listener_=0;configured_=false;friends_=false;allowed_.clear();admitted_.clear();target_=0;}
 bool Broker::pop(Frame& f){if(out_.empty())return false;f=std::move(out_.front());out_.pop_front();return true;}
 bool Broker::retire(std::uint64_t id,std::uint32_t reason){
     const auto it=peers_.find(id);if(it==peers_.end())return true;
@@ -58,7 +58,9 @@ bool Broker::command(const Frame& f,std::uint64_t now){
     if(f.op==Op::Host){
         // An empty allowlist (runtime --steam-listener-probe) still listens and verifies ICE, but the
         // Connecting check below then refuses every identity before accept.
-        if(configured_||f.peer||f.bytes.size()>MaxPeers*8||f.bytes.size()%8)return fail("bad-host-allowlist");
+        // reason 1: the host is open to its Steam friends as well (the launcher's Discord Join).
+        if(configured_||f.peer||f.reason>1||f.bytes.size()>MaxPeers*8||f.bytes.size()%8)return fail("bad-host-allowlist");
+        friends_=f.reason==1;
         for(std::size_t i=0;i<f.bytes.size();i+=8){const auto id=get(f.bytes,i,8);if(!validId(id)||id==identity_||std::find(allowed_.begin(),allowed_.end(),id)!=allowed_.end())return fail("bad-host-allowlist");allowed_.push_back(id);}
         listener_=api_.listen();if(!listener_||!api_.iceOff(listener_,true))return fail("listen-ice-off-unverified");
         configured_=true;return emit({Op::Ready,identity_});
@@ -100,7 +102,8 @@ bool Broker::tick(std::uint64_t now,std::size_t ipcBacklog){
     for(unsigned n=0;n<64&&outputRoom()&&api_.nextStatus(s);++n){
         auto it=peers_.find(s.identity);
         if(s.state==1 && listener_ && s.listener==listener_){
-            if(!s.authenticated||std::find(allowed_.begin(),allowed_.end(),s.identity)==allowed_.end()||it!=peers_.end()||peers_.size()>=MaxPeers||!api_.iceOff(s.handle,false)) {api_.close(s.handle,false);continue;}
+            const bool listed=std::find(allowed_.begin(),allowed_.end(),s.identity)!=allowed_.end()||(friends_&&validId(s.identity)&&s.identity!=identity_&&api_.isFriend(s.identity));
+            if(!s.authenticated||!listed||it!=peers_.end()||peers_.size()>=MaxPeers||!api_.iceOff(s.handle,false)) {api_.close(s.handle,false);continue;}
             try {peers_.emplace(s.identity,Peer{s.handle,false,now});} catch(...) {api_.close(s.handle,false);throw;}
             if(std::find(admitted_.begin(),admitted_.end(),s.identity)==admitted_.end())admitted_.push_back(s.identity);
             if(!api_.accept(s.handle)&&!retire(s.identity))return false;

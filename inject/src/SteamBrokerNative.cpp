@@ -77,6 +77,8 @@ class Native final:public steam::Api {
     int (__cdecl *quality_)(void*,std::uint32_t,Quality*,int,void*)=nullptr;
     void (__cdecl *identitySet_)(Identity*,std::uint64_t)=nullptr;
     std::uint64_t (__cdecl *identityGet_)(const Identity*)=nullptr;
+    void* (__cdecl *getFriends_)()=nullptr; int (__cdecl *relationship_)(void*,std::uint64_t)=nullptr; // optional
+    void* friends_=nullptr;
     void *user_=nullptr,*utils_=nullptr,*sockets_=nullptr,*nu_=nullptr;
     FILE* log_; bool healthy_=true,sendBusy_=false,steamEnded_=false;
     HMODULE module_=nullptr;int boundPipe_=0;
@@ -107,6 +109,7 @@ public:
         GET(identitySet_,"SteamAPI_SteamNetworkingIdentity_SetSteamID64");GET(identityGet_,"SteamAPI_SteamNetworkingIdentity_GetSteamID64");
 #undef GET
         load(m,runCallbacks_,"SteamAPI_ISteamNetworkingSockets_RunCallbacks");
+        if(load(m,getFriends_,"SteamAPI_SteamFriends_v017")&&load(m,relationship_,"SteamAPI_ISteamFriends_GetFriendRelationship"))friends_=getFriends_();
         module_=m;boundPipe_=pipeHandle_();
         if(!userHandle_()||!boundPipe_)return false;
         user_=getUser_();utils_=getUtils_();sockets_=getSockets_();nu_=getNetworkUtils_();
@@ -173,6 +176,12 @@ public:
 
     }
     bool congested()const override{return sendBusy_;}
+    // k_EFriendRelationshipFriend (3): an accepted Steam friend of this user.
+    bool isFriend(std::uint64_t id) override {
+        if(!pipeAlive()||!friends_||!relationship_)return false;
+        const int r=relationship_(friends_,id);std::fprintf(log_,"[steam-broker] friend check peer=%llu relationship=%d\n",static_cast<unsigned long long>(id),r);
+        return r==3;
+    }
     bool quality(std::uint32_t h,std::uint32_t& rtt,std::uint32_t& loss)override{
         if(!pipeAlive())return false;Quality q{};if(quality_(sockets_,h,&q,0,nullptr)!=1||q.state!=3||q.ping<0||!std::isfinite(q.local)||q.local<0||q.local>1)return false;
         rtt=static_cast<std::uint32_t>(q.ping);loss=static_cast<std::uint32_t>((1.0f-q.local)*1000.0f+0.5f);return true;

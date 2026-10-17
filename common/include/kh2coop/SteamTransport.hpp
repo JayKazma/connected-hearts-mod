@@ -16,10 +16,10 @@ struct SteamTransports {
 // admitted. Without it a host needs one or two allowlisted friends.
 SteamTransports makeSteamTransports(std::uint32_t gamePid, bool host,
                                    const std::vector<std::uint64_t>& allowlist,
-                                   bool listenerProbe = false);
+                                   bool listenerProbe = false, bool friends = false);
 // Same transport with an already authenticated broker link; mock boundary for
 // offline tests. Production entry above always creates the OS-verified pipe.
 SteamTransports makeSteamTransports(std::unique_ptr<steam::BrokerLink> link, bool host,
                                    const std::vector<std::uint64_t>& allowlist,
-                                   bool listenerProbe = false);
+                                   bool listenerProbe = false, bool friends = false);
 } // namespace kh2coop

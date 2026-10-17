@@ -53,6 +53,8 @@ public:
     virtual bool send(std::uint32_t, std::span<const std::uint8_t>, bool)=0;
     virtual bool congested() const { return false; } // last send: explicit SDK LimitExceeded
     virtual bool quality(std::uint32_t, std::uint32_t& rttMs, std::uint32_t& lossPermille) { (void)rttMs;(void)lossPermille;return false; }
+    // The local Steam user's friends list (ISteamFriends relationship "friend"); hosts open to friends.
+    virtual bool isFriend(std::uint64_t) { return false; }
 };
 class Broker {
 public:
@@ -75,6 +77,7 @@ private:
     std::uint64_t identity_=0, target_=0, lastCommand_=0, firstTick_=0, lastIdentityCheck_=0;
     std::uint32_t listener_=0;
     bool configured_=false, failed_=false;
+    bool friends_=false; // Host reason 1: also admit any Steam friend of this user (Discord Join)
     std::vector<std::uint64_t> allowed_, admitted_; // <=2 fixed-authority identities per configuration
     std::map<std::uint64_t,Peer> peers_;
     std::deque<Frame> out_;

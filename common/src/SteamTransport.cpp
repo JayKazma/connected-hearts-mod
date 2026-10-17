@@ -14,6 +14,7 @@ struct Hub {
     std::uint64_t identity=0,lastPing=0;
     bool host=false,dead=false,listening=false,localConnected=false,configured=false;
     std::vector<std::uint64_t> allowed;
+    bool friends=false; // host also admits the user's Steam friends
     std::map<std::uint64_t,TransportStats> quality;
     std::deque<steam::Frame> server,client,commands;
     void fail(){dead=true;pipe->close();}
@@ -72,7 +73,7 @@ public:
     bool createClient(std::size_t n,std::size_t channels)override{if(server_||n!=1||channels!=3||hub_->dead)return false;open_=true;return true;}
     TransportOpenResult listen(const std::string&,std::uint16_t,std::size_t n,std::size_t channels)override{
         if(!server_||n>3||channels!=3||hub_->dead||hub_->listening)return TransportOpenResult::CreateFailed;
-        steam::Frame f{steam::Op::Host};for(auto id:hub_->allowed)for(unsigned b=0;b<8;++b)f.bytes.push_back(static_cast<std::uint8_t>(id>>(8*b)));
+        steam::Frame f{steam::Op::Host,0,hub_->friends?1u:0u};for(auto id:hub_->allowed)for(unsigned b=0;b<8;++b)f.bytes.push_back(static_cast<std::uint8_t>(id>>(8*b)));
         if(!hub_->command(f))return TransportOpenResult::CreateFailed;
         const auto end=now()+5000;while(!hub_->configured&&now()<end){if(!hub_->pump())break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
         if(!hub_->configured){hub_->fail();return TransportOpenResult::CreateFailed;}hub_->listening=true;open_=true;return TransportOpenResult::Ok;
@@ -141,16 +142,17 @@ public:
     std::string authenticatedIdentity(TransportPeer* p)const override{return pendingPeerLabel(p);}
 };
 }
-SteamTransports makeSteamTransports(std::uint32_t pid,bool host,const std::vector<std::uint64_t>& allowed,bool listenerProbe){
+SteamTransports makeSteamTransports(std::uint32_t pid,bool host,const std::vector<std::uint64_t>& allowed,bool listenerProbe,bool friends){
     if(listenerProbe&&(!host||!allowed.empty()))return {};
     auto pipe=std::make_unique<steam::Pipe>();if(!pipe->attach(pid))return {};
-    return makeSteamTransports(std::move(pipe),host,allowed,listenerProbe);
+    return makeSteamTransports(std::move(pipe),host,allowed,listenerProbe,friends);
 }
-SteamTransports makeSteamTransports(std::unique_ptr<steam::BrokerLink> pipe,bool host,const std::vector<std::uint64_t>& allowed,bool listenerProbe){
+SteamTransports makeSteamTransports(std::unique_ptr<steam::BrokerLink> pipe,bool host,const std::vector<std::uint64_t>& allowed,bool listenerProbe,bool friends){
     SteamTransports result;
-    if(listenerProbe&&(!host||!allowed.empty()))return result; // probe: host with an empty allowlist only
-    if(host&&((!listenerProbe&&allowed.empty())||allowed.size()>steam::MaxPeers))return result;
-    auto hub=std::make_shared<Hub>();hub->host=host;hub->allowed=allowed;
+    if(listenerProbe&&(!host||!allowed.empty()||friends))return result; // probe: host with an empty allowlist only
+    if(friends&&!host)return result;
+    if(host&&((!listenerProbe&&!friends&&allowed.empty())||allowed.size()>steam::MaxPeers))return result;
+    auto hub=std::make_shared<Hub>();hub->host=host;hub->allowed=allowed;hub->friends=friends;
     hub->pipe=std::move(pipe);if(!hub->pipe||!hub->pipe->connected()||!hub->pipe->send({steam::Op::Hello}))return result;
     const auto end=now()+5000;steam::Frame f;bool ready=false;
     while(now()<end){if(!hub->pipe->pump())return result;if(hub->pipe->receive(f)){ready=f.op==steam::Op::Ready&&steam::validId(f.peer);break;}std::this_thread::sleep_for(std::chrono::milliseconds(1));}
