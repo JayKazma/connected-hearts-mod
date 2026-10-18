@@ -4130,6 +4130,7 @@ std::vector<std::size_t> TrackSpawns(const NativeCensus& census) {
             s.identityRead = now.identityRead;
             s.objectId = native.objectId;
             s.objectType = native.objectType;
+            if (s.objectType == offsets::objentry::TYPE_BOSS) enemymirror::NoteBoss(s.objectId);
             s.spawnPos = native.position;
             g_inst.spawns.push_back(s);
             index = g_inst.spawns.size() - 1;
@@ -4282,6 +4283,10 @@ void Install(uintptr_t exeBase, LogFn log, StatDeltaFn applyStatDelta, TakeDamag
     progresssync::Install(exeBase, log, SendCapturedWorld);
     char mirror[2] {};
     g_mirrorRequested = GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR", mirror, sizeof(mirror)) == 1 && mirror[0] == '1';
+    char mirrorAll[2] {};
+    enemymirror::g_mirrorAllMobs = g_mirrorRequested &&
+        GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR_ALL", mirrorAll, sizeof(mirrorAll)) == 1 && mirrorAll[0] == '1';
+    if (enemymirror::g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses and burrowers stay native");
     char delayText[16] {};
     const DWORD delayLength = GetEnvironmentVariableA("KH2COOP_ENEMY_CURSOR_DELAY_FRAMES", delayText, sizeof(delayText));
     const auto delay = delayLength > 0 && delayLength < sizeof(delayText)

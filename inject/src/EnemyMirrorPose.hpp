@@ -88,9 +88,23 @@ inline constexpr std::uint32_t kFamilies[] = {kShadowObjectId, kHookBatObjectId,
 // friend's attacks pass through it (2026-10-17, TT/HB Shadows: no friend hit landed while driven).
 // HP and deaths still follow the host.
 inline constexpr std::uint32_t kBurrowers[] = {kShadowObjectId, kNeoshadowObjectId, kDrillerMoleObjectId};
+// KH2COOP_ENEMY_MIRROR_ALL=1 (2026-10-17, candidate): every regular enemy (objentry type 4) is
+// mirrored, not only the reviewed families; bosses (type 3, recorded as they spawn) and the
+// burrowers never are. Set once at install; the boss list is written on the game thread.
+inline bool g_mirrorAllMobs = false;
+inline std::uint32_t g_bossIds[32] {};
+inline unsigned g_bossCount = 0;
+inline void NoteBoss(std::uint32_t objectId) noexcept {
+    for (unsigned i = 0; i < g_bossCount; ++i) if (g_bossIds[i] == objectId) return;
+    if (g_bossCount < 32) g_bossIds[g_bossCount++] = objectId;
+}
 inline bool FamilyAllowed(std::uint32_t objectId) noexcept {
     for (const auto b : kBurrowers)
         if (objectId == b) return false;
+    if (g_mirrorAllMobs) {
+        for (unsigned i = 0; i < g_bossCount; ++i) if (g_bossIds[i] == objectId) return false;
+        return objectId != 0;
+    }
     for (const auto family : kFamilies)
         if (objectId == family) return true;
     return false;
