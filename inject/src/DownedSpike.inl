@@ -863,7 +863,7 @@ static void Install(uintptr_t exeBase) {
         return;
     }
     wchar_t name[64];
-    std::swprintf(name, 64, L"%s%lu", kChannelPrefix, GetCurrentProcessId());
+    std::swprintf(name, 64, L"%ls%lu", kChannelPrefix, GetCurrentProcessId());
     if (fixture)
         g_down.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Channel), name);
     if (g_down.mapping) {
