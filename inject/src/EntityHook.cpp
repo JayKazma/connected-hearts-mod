@@ -1592,6 +1592,9 @@ static void Admit(int i, const AvatarState& pose) {
     if (pose.castSeq == d.lastCastSeq) return;
     d.lastCastSeq = pose.castSeq;
     if (!g_enabled || pose.castId == 0) return;
+    // Only the plain form: id 49 form 12 replayed in a boss room (04/21) left the clone in a motion
+    // that faulted on its next update (0x3C51E7, friend crash 2026-10-17). Replays seen working: form 0.
+    if (pose.castForm != 0) return;
     d.castPending = true; d.castId = pose.castId; d.castCategory = pose.castCategory;
     d.castFlags = pose.castFlags; d.castForm = pose.castForm;
 }
