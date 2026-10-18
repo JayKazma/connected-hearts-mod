@@ -256,7 +256,10 @@ std::mutex g_queueMutex;
 std::condition_variable g_queueCv;
 std::deque<EncodeItem> g_encodeQueue;
 bool g_stopWorker = false;
-std::thread g_worker;
+// Heap-held and never destroyed at process exit: a joinable std::thread's destructor calls
+// std::terminate, and the game's normal exit (no Shutdown call) ended every session in abort
+// (0x40000015, a crash dump on each window close).
+std::thread* g_worker = nullptr;
 std::atomic<std::uint32_t> g_pendingEncodes {0};
 std::atomic<std::uint32_t> g_written {0};
 std::atomic<bool> g_writeFailed {false};
@@ -1548,7 +1551,7 @@ bool Install(uintptr_t exeBase, LogFn log) {
     if (hooked == 0) return false;
 
     g_stopWorker = false;
-    g_worker = std::thread(WorkerMain);
+    if (!g_worker) g_worker = new std::thread(WorkerMain);
     if (g_log) g_log("  Present hook installed (%d entry points)", hooked);
     return true;
 }
@@ -1568,7 +1571,11 @@ void Shutdown() {
         g_stopWorker = true;
     }
     g_queueCv.notify_all();
-    if (g_worker.joinable()) g_worker.join();
+    if (g_worker) {
+        if (g_worker->joinable()) g_worker->join();
+        delete g_worker;
+        g_worker = nullptr;
+    }
 
     if (g_channel) {
         UnmapViewOfFile(g_channel);
