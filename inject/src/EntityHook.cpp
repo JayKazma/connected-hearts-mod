@@ -573,6 +573,16 @@ static constexpr uint8_t kApplyStatDeltaBytes[] = {
 static PFN_ApplyStatDelta g_origApplyStatDelta = nullptr;
 static uint32_t g_hpDamageLogged = 0;
 static constexpr uint32_t HP_DAMAGE_LOG_LIMIT = 40;
+// Boss fights get their own [hp]/[hit] budget, so the first trash fight of a session doesn't use it up.
+static uint32_t g_bossLogged = 0;
+static constexpr uint32_t BOSS_LOG_LIMIT = 600;
+static bool IsBossActor(uintptr_t actor) {
+    uintptr_t obj = 0;
+    uint8_t type = 0;
+    return actor && ReadHitTrace(actor + offsets::actor::OBJENTRY_PTR, obj) && obj > g_exeBase &&
+           obj < g_exeBase + 0x3000000 && ReadHitTrace(obj + offsets::objentry::TYPE_FLAGS, type) &&
+           offsets::objentry::IsBossType(type);
+}
 
 static void LogHpDelta(void* actor, int delta, int idx, int reactFlag, int result) {
     char name[33] = "?";
@@ -601,8 +611,10 @@ static void LogHpDelta(void* actor, int delta, int idx, int reactFlag, int resul
 
 static int ApplyStatDeltaBody(void* actor, int delta, int idx, int reactFlag) {
     const int result = g_origApplyStatDelta(actor, delta, idx, reactFlag);
-    if (idx == 0 && delta < 0 && g_hpDamageLogged < HP_DAMAGE_LOG_LIMIT) {
-        ++g_hpDamageLogged;
+    const bool bossLog = idx == 0 && delta < 0 && g_bossLogged < BOSS_LOG_LIMIT &&
+                         IsBossActor(reinterpret_cast<uintptr_t>(actor));
+    if (idx == 0 && delta < 0 && (bossLog || g_hpDamageLogged < HP_DAMAGE_LOG_LIMIT)) {
+        if (bossLog) ++g_bossLogged; else ++g_hpDamageLogged;
         __try {
             LogHpDelta(actor, delta, idx, reactFlag, result);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -725,7 +737,10 @@ static uintptr_t __fastcall HookedBuildHit(void* atk, void* victim, uint32_t a3,
             enemymirror::NoteHit(attackerActor, reinterpret_cast<uintptr_t>(victim), atkpId, victimName,
                                  *reinterpret_cast<const int32_t*>(hit + 0x28), *reinterpret_cast<const uint8_t*>(hit + 0x25));
         }
-        if (g_hitsLogged >= HIT_LOG_LIMIT) return hit;
+        const bool bossLog = g_bossLogged < BOSS_LOG_LIMIT &&
+                             (IsBossActor(reinterpret_cast<uintptr_t>(victim)) || IsBossActor(attackerActor));
+        if (!bossLog && g_hitsLogged >= HIT_LOG_LIMIT) return hit;
+        if (bossLog) ++g_bossLogged;
         const int32_t damage = *reinterpret_cast<const int32_t*>(hit + 0x28);
         const uint8_t stat = *reinterpret_cast<const uint8_t*>(hit + 0x25);
         char attacker[32], target[32];
@@ -735,7 +750,7 @@ static uintptr_t __fastcall HookedBuildHit(void* atk, void* victim, uint32_t a3,
         const auto status = *reinterpret_cast<const uintptr_t*>(
             reinterpret_cast<uintptr_t>(victim) + 0x5C0);
         if (status > 0x10000) hp = reinterpret_cast<const int32_t*>(status);
-        ++g_hitsLogged;
+        if (!bossLog) ++g_hitsLogged;
         Log("[hit] frame %u attacker=%s (handle %08X) atkp=%u -> victim=%s@%llX damage=%d stat=%u hpBefore=%d",
             g_frameCounter, attacker, ownerHandle, atkpId, target,
             static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(victim)),
