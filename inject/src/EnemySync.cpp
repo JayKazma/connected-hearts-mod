@@ -4631,9 +4631,21 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         if (!hit.victim || !hit.attacker || hit.damage <= 0 ||
             !std::isfinite(claim.attackerPosition.x) || !std::isfinite(claim.attackerPosition.y) ||
             !std::isfinite(claim.attackerPosition.z)) return reject("invalid local HP hit");
+        // Bosses (objentry type 3) run their own AI on every game and many make and remove bodies
+        // (duplicates, phases) on their own schedule, so the full living-set match below never holds
+        // for them. Their claims skip that hold and go to a living host boss of the same object id;
+        // the host's HP comes back as usual. Mobs keep the full match.
+        NativeEnemy bossNative;
+        bool bossEnemy = false;
+        const bool boss = ReadNativeEnemy(hit.victim, bossNative, bossEnemy) && bossEnemy &&
+                          bossNative.objectType == offsets::objentry::TYPE_BOSS && bossNative.hp > 0;
+        const auto scopeReady = [&] {
+            const bool ready = EnsureClientClaimScope();
+            return boss ? (g_clientClaimHold.bound && !g_clientClaimHold.poisoned) : ready;
+        };
         // Arm/refine the generic scope before consulting prior replay state.
         // Held claims do not consume claim sequence or enter the world ring.
-        if (!EnsureClientClaimScope()) {
+        if (!scopeReady()) {
             if (g_clientClaimHold.dropped == UINT64_MAX) g_clientClaimHold.poisoned = true;
             else ++g_clientClaimHold.dropped;
             LogClientClaim("drop", "full-manifest-readback-pending");
@@ -4655,9 +4667,26 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         const auto census = CaptureNativeCensus();
         if (!CensusMatchesInstance(census)) return reject("local census unavailable");
         const auto found = g_inst.byActor.find(hit.victim);
-        if (found == g_inst.byActor.end() || found->second >= g_inst.spawns.size())
-            return reject("local binding unavailable");
-        const Spawn& spawn = g_inst.spawns[found->second];
+        const Spawn* bound = found != g_inst.byActor.end() && found->second < g_inst.spawns.size() ? &g_inst.spawns[found->second] : nullptr;
+        const auto liveHost = [&](int netId, std::uint32_t objectId) {
+            if (netId <= 0 || netId > UINT16_MAX) return false;
+            const auto h = g_host.enemies.find(static_cast<std::uint16_t>(netId));
+            return h != g_host.enemies.end() && h->second.objectId == objectId && h->second.battleProgram == g_inst.btl && !h->second.dead;
+        };
+        if (boss) {
+            if (bound && bound->present && !bound->killed && liveHost(bound->netId, bossNative.objectId)) {
+                claim.netId = static_cast<std::uint16_t>(bound->netId);
+            } else {
+                claim.netId = 0;
+                for (const auto& [id, h] : g_host.enemies)
+                    if (liveHost(id, bossNative.objectId)) { claim.netId = id; break; }
+                if (!claim.netId) return reject("no living host boss of this object id");
+            }
+            claim.objectId = bossNative.objectId;
+            if (bossNative.maxHp <= 0) return reject("local boss metadata changed/dead");
+        } else {
+        if (!bound) return reject("local binding unavailable");
+        const Spawn& spawn = *bound;
         if (!spawn.present || spawn.killed || spawn.netId <= 0 || spawn.netId > UINT16_MAX)
             return reject("local binding not live/matched");
         claim.netId = static_cast<std::uint16_t>(spawn.netId);
@@ -4672,6 +4701,7 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         if (!sampled || !ReadNativeEnemy(hit.victim, native, isEnemy) || !isEnemy ||
             !SameNativeIdentity(*sampled, native) || native.hp <= 0 || native.maxHp <= 0)
             return reject("local target metadata changed/dead");
+        }
         RoomTransition finalLocation;
         if (!ActivationContext(Role::Client, finalLocation) ||
             !sameActivationLocation(location, finalLocation) || !CensusMatchesInstance(census) ||
@@ -4684,7 +4714,7 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         }
         if (g_localClaimSequence == std::numeric_limits<std::uint32_t>::max())
             return reject("local sequence exhausted");
-        if (!EnsureClientClaimScope()) return reject("claim scope retired before publication");
+        if (!scopeReady()) return reject("claim scope retired before publication");
         claim.seq = ++g_localClaimSequence;
         // Encode/send this detection's immutable identity immediately. A full
         // ring drops the claim; it can never be relabeled after a room change.
@@ -4692,9 +4722,9 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         if (g_clientClaimHold.submitted == UINT64_MAX) g_clientClaimHold.poisoned = true;
         else ++g_clientClaimHold.submitted;
         LogClientClaim("submitted", "world-ring-enqueued", 0, &claim);
-        if (g_log) g_log("[enemysync] client hit claim connection=%llu seq=%u epoch=%u netId=%u objectId=%u attackId=%u damage=%d",
+        if (g_log) g_log("[enemysync] client hit claim connection=%llu seq=%u epoch=%u netId=%u objectId=%u attackId=%u damage=%d%s",
                          static_cast<unsigned long long>(claim.requesterConnectionId), claim.seq, claim.epoch,
-                         claim.netId, claim.objectId, claim.attackId, claim.damage);
+                         claim.netId, claim.objectId, claim.attackId, claim.damage, boss ? " boss" : "");
         return true;
     } catch (...) {
         return false; // diagnostics/network allocation can never escape the hit hook
