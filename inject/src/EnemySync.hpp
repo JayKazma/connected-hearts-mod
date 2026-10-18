@@ -59,6 +59,9 @@ struct LocalPlayerEnemyHit {
 };
 bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept;
 
+// Host, game thread: `actor`'s HP just reached 0 (HP-change hook); its death goes out at once.
+void HostEnemyHpZero(uintptr_t actor) noexcept;
+
 // Game thread, at the head actor's update entry, before its native update.
 // Dependency scheduling means this need not be the first actor callback.
 void OnFrameStart(std::uint32_t frame);

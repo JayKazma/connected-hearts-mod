@@ -611,6 +611,7 @@ static void LogHpDelta(void* actor, int delta, int idx, int reactFlag, int resul
 
 static int ApplyStatDeltaBody(void* actor, int delta, int idx, int reactFlag) {
     const int result = g_origApplyStatDelta(actor, delta, idx, reactFlag);
+    if (idx == 0 && delta < 0) enemysync::HostEnemyHpZero(reinterpret_cast<uintptr_t>(actor));
     const bool bossLog = idx == 0 && delta < 0 && g_bossLogged < BOSS_LOG_LIMIT &&
                          IsBossActor(reinterpret_cast<uintptr_t>(actor));
     if (idx == 0 && delta < 0 && (bossLog || g_hpDamageLogged < HP_DAMAGE_LOG_LIMIT)) {

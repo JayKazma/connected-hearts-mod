@@ -4660,6 +4660,29 @@ bool DropLocalEnemyDamage(uintptr_t victim) {
            !warp::TransitionPending() && IsEnemy(victim);
 }
 
+// Host, game thread, from the HP-change hook: an enemy's HP just reached 0. The census in HostFrame waits for
+// open gameplay, and a boss's defeat cutscene starts on that same frame, so the death waited for the cutscene's
+// next stage (2026-10-18, Twilight Thorn: the friend's game ended the fight 9.7 s late). Send it now.
+void HostEnemyHpZero(uintptr_t actor) noexcept {
+    if (g_role != Role::Host || !g_inst.live || !actor || !spawncontroller::IsDiagnosticGameThread()) return;
+    try {
+        const auto found = g_inst.byActor.find(actor);
+        if (found == g_inst.byActor.end() || found->second >= g_inst.spawns.size()) return;
+        Spawn& s = g_inst.spawns[found->second];
+        uintptr_t status = 0;
+        std::int32_t hp = 1;
+        if (s.actor != actor || !s.present || s.deathSent || !s.status || !ReadNative(actor + 0x5C0, status) ||
+            status != s.status || !ReadNative(status, hp) || hp > 0) return;
+        EnemyDeath d;
+        d.epoch = g_epoch;
+        d.netId = static_cast<std::uint16_t>(s.spawnIndex + 1);
+        if (Send(encode(d))) {
+            s.deathSent = true;
+            SYNC_LOG("[enemysync] host death epoch %u netId %u (at the hit)", g_epoch, d.netId);
+        }
+    } catch (...) {}
+}
+
 bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
     // All claim/lease state belongs to the native game thread. In particular,
     // do not query ActivationContext (which can invalidate state) before this.
