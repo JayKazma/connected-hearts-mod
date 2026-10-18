@@ -4338,7 +4338,7 @@ void Install(uintptr_t exeBase, LogFn log, StatDeltaFn applyStatDelta, TakeDamag
     char mirrorAll[2] {};
     g_mirrorAllMobs = g_mirrorRequested &&
         GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR_ALL", mirrorAll, sizeof(mirrorAll)) == 1 && mirrorAll[0] == '1';
-    if (g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses stay native; burrowers %s", enemymirror::MirrorBurrowers() ? "mirrored with their underground state" : "native (KH2COOP_MIRROR_BURROWERS=0)");
+    if (g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses %s; burrowers %s", enemymirror::MirrorBosses() ? "follow the host (KH2COOP_MIRROR_BOSSES=1)" : "stay native", enemymirror::MirrorBurrowers() ? "mirrored with their underground state" : "native (KH2COOP_MIRROR_BURROWERS=0)");
     char delayText[16] {};
     const DWORD delayLength = GetEnvironmentVariableA("KH2COOP_ENEMY_CURSOR_DELAY_FRAMES", delayText, sizeof(delayText));
     const auto delay = delayLength > 0 && delayLength < sizeof(delayText)
@@ -5327,6 +5327,13 @@ bool MirrorBurrowers() noexcept {
     static const bool on = [] {
         char v[2] {};
         return !(GetEnvironmentVariableA("KH2COOP_MIRROR_BURROWERS", v, sizeof(v)) == 1 && v[0] == '0');
+    }();
+    return on;
+}
+bool MirrorBosses() noexcept {
+    static const bool on = [] {
+        char v[2] {};
+        return GetEnvironmentVariableA("KH2COOP_MIRROR_BOSSES", v, sizeof(v)) == 1 && v[0] == '1';
     }();
     return on;
 }

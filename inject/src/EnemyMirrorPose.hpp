@@ -96,6 +96,8 @@ inline bool IsBurrower(std::uint32_t objectId) noexcept {
     return false;
 }
 bool MirrorBurrowers() noexcept;
+// KH2COOP_MIRROR_BOSSES=1 (with KH2COOP_ENEMY_MIRROR_ALL=1): bosses follow the host's boss too.
+bool MirrorBosses() noexcept;
 // KH2COOP_ENEMY_MIRROR_ALL=1 (2026-10-17, candidate): every regular enemy (objentry type 4) is
 // mirrored, not only the reviewed families; bosses (type 3, recorded as they spawn) and the
 // burrowers never are. State lives in EnemySync.cpp (MirrorAll: 0 off, 1 allowed, 2 a boss).
@@ -103,7 +105,7 @@ int MirrorAll(std::uint32_t objectId) noexcept;
 void NoteBoss(std::uint32_t objectId) noexcept;
 inline bool FamilyAllowed(std::uint32_t objectId) noexcept {
     if (IsBurrower(objectId)) return MirrorBurrowers();
-    if (const int all = MirrorAll(objectId)) return all == 1;
+    if (const int all = MirrorAll(objectId)) return all == 1 || (all == 2 && MirrorBosses());
     for (const auto family : kFamilies)
         if (objectId == family) return true;
     return false;
