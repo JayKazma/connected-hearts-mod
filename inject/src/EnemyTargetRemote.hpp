@@ -2,6 +2,7 @@
 // VUH-1515: host enemies can target remote players' native clones (KH2COOP_ENEMY_TARGET_REMOTE).
 // Pure rules only: no game memory, no Windows calls. The native adapter is
 // EnemyTargetRemote.inl (included inside EntityHook's namespace). See docs/ENEMY_TARGET_REMOTE.md.
+#include "EnemyMirrorPose.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -14,9 +15,12 @@ namespace kh2coop::inject::enemytarget::rules {
 // Shadow (302, M_EX020): mode_battle PC 2275/2290/2078, verified statically and live (VUH-1515
 // attempt07, run 20261007-033207). Every other object id keeps the native behaviour.
 inline constexpr std::uint32_t kAllowedObjectIds[] = {302};
+// With the enemy mirror on, the mirrored families are candidates too (2026-10-17, not yet read per
+// family): the friend's copies replay the host's motion, so a host enemy that turns to the friend's
+// clone attacks the friend's real Sora on the friend's screen.
 inline bool AllowedObject(std::uint32_t objectId) noexcept {
     for (const auto id : kAllowedObjectIds) if (id == objectId) return true;
-    return false;
+    return enemymirror::FamilyAllowed(objectId);
 }
 
 // ---- bdscript "target_search" (bank1/121) ---------------------------------------------------

@@ -157,17 +157,14 @@ static bool EligibleEnemy(uintptr_t enemy, uintptr_t& objentry) noexcept {
 static void Configure() {
     g = {};
     if (!Env1("KH2COOP_ENEMY_TARGET_REMOTE")) return;
-    if (Env1("KH2COOP_PARTY_NATIVE")) {  // no joint fixture yet: the two flags refuse each other
-        Log("[enemy-target] configure refused=party-native");
-        return;
-    }
+    // With KH2COOP_PARTY_NATIVE the clone is a party member with its own private status in every room.
     g.requested = true;
     // Distinct clone status is a candidate requirement; the private-status scope must be able to
     // give a clone one outside GoA (verified rooms only, party row 00/00/02/12; review S2).
     privatestatus::EnableEnemyTargetScope();
     g.mode = static_cast<std::uint8_t>(enemysync::MirrorRequested() ? R::Mode::Mirror : R::Mode::Forward);
     g.reviveCount = downedspike::g_down.reviveCount;
-    Log("[enemy-target] configure requested=1 schema=2 allow=302 hysteresis=%.0f hold=%u cap=%u table=%u mirror=%u",
+    Log("[enemy-target] configure requested=1 schema=2 allow=302+mirror hysteresis=%.0f hold=%u cap=%u table=%u mirror=%u",
         double(R::Policy::Hysteresis), R::Policy::MinHoldFrames, R::Policy::CloneCap, R::Policy::TableCapacity,
         unsigned(g.mode));
 }
