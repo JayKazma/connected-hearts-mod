@@ -1971,6 +1971,34 @@ void ExtrasTick(std::uint32_t frame, const NativeCensus& census) {
                      target->unboundFrames, ok ? "removed" : "removal FAILED");
 }
 
+// Client: a host boss death (the host reports bosses only at 0 HP) ends that boss here too. Its local
+// bodies are often not the ones the host's netIds are bound to (bodies come and go on each game), so
+// every living local boss body of that object id gets the native lethal. One per frame.
+void BossDeathTick(std::uint32_t frame, const NativeCensus& census) {
+    if (g_role != Role::Client || !g_host.arrived || !g_applyStatDelta) return;
+    if (g_resyncWriteFence != ResyncWriteFence::None || !SafeNativeGameplay()) return;
+    const auto generation = WorldSessionGeneration();
+    if (!generation) return;
+    for (Spawn& s : g_inst.spawns) {
+        if (!s.present || s.killed || s.deathAttempted || s.objectType != offsets::objentry::TYPE_BOSS || s.lastHp <= 0) continue;
+        bool hostDead = false;
+        for (const auto& [id, h] : g_host.enemies)
+            if (h.dead && h.objectId == s.objectId && h.battleProgram == g_inst.btl) { hostDead = true; break; }
+        if (!hostDead) continue;
+        const auto* sampled = FindNativeEnemy(census, s);
+        NativeEnemy native;
+        bool isEnemy = false;
+        s.deathAttempted = true;
+        if (!sampled || !ReadNativeEnemy(s.actor, native, isEnemy) || !isEnemy || !SameNativeIdentity(*sampled, native) || native.hp <= 0) return;
+        const int before = native.hp;
+        const bool ok = ApplyNativeDeath(native, before, generation, nullptr);
+        if (g_log) g_log("[enemysync] client: host boss %u defeated; local body spawn %u (hp %d) %s", s.objectId, s.spawnIndex, before,
+                         ok ? "ended" : "end FAILED");
+        (void)frame;
+        return;
+    }
+}
+
 // Client, after a successful ClientFrame (bindings resolved for this census).
 void PopulationTick(std::uint32_t frame, const NativeCensus& census) {
     if (!g_populationRequested || g_role != Role::Client) return;
@@ -4545,6 +4573,7 @@ void OnFrameStart(std::uint32_t frame) {
         if (!ClientFrame(census)) { DrainPendingSpawnTrace(false); return; }
         PopulationTick(frame, census);  // VUH-1788 (default off)
         ExtrasTick(frame, census);
+        BossDeathTick(frame, census);
     }
     PublishAppliedHash(frame, census);
     TickNativeResync(frame, true);
