@@ -549,6 +549,20 @@ void PostUpdate(uintptr_t actor) {
         }
     }
     if (WritePose(actor, *d)) ++g_mstats.writes; else ++g_mstats.writeFaults;
+    // Burrowers: the host's underground state (the skipped AI would have set or cleared it).
+    if (enemymirror::IsBurrower(d->pose.objectId)) {
+        std::uint8_t st = 0;
+        if (ReadHitTrace(actor + enemymirror::kBurrowStateOffset, st)) {
+            const std::uint8_t want = d->pose.hidden ? static_cast<std::uint8_t>(st | enemymirror::kBurrowHiddenBits)
+                                                     : static_cast<std::uint8_t>(st & ~enemymirror::kBurrowHiddenBits);
+            if (want != st) {
+                __try { *reinterpret_cast<std::uint8_t*>(actor + enemymirror::kBurrowStateOffset) = want; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                static unsigned logged = 0;
+                if (logged < 40 && ++logged) Log("[enemy-mirror] burrow frame=%u actor=%llX hidden=%u 0x120 %02X -> %02X motion=%u",
+                    g_frameCounter, static_cast<unsigned long long>(actor), d->pose.hidden ? 1u : 0u, st, want, d->pose.motionId);
+            }
+        }
+    }
 }
 
 // HookedBuildHit: is this attacker one of ours (bound or driven)?

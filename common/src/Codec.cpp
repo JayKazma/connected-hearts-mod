@@ -793,7 +793,8 @@ void checkEnemyMotion(const EnemyMotion& m) {
     for (std::size_t i = 0; i < m.entries.size(); ++i) {
         const auto& e = m.entries[i];
         if (!e.netId || !e.objectId) throw std::runtime_error("EnemyMotion: zero netId/objectId");
-        if (e.flags != ENEMY_MOTION_ALIVE) throw std::runtime_error("EnemyMotion: bad flags");
+        if (!(e.flags & ENEMY_MOTION_ALIVE) || (e.flags & ~(ENEMY_MOTION_ALIVE | ENEMY_MOTION_HIDDEN)))
+            throw std::runtime_error("EnemyMotion: bad flags");
         if (!std::isfinite(e.motionTime) || !std::isfinite(e.rotationY) || !std::isfinite(e.position.x) ||
             !std::isfinite(e.position.y) || !std::isfinite(e.position.z))
             throw std::runtime_error("EnemyMotion: non-finite value");

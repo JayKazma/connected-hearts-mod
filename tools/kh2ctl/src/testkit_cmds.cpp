@@ -58,6 +58,32 @@ int RunTestCommand(std::uint32_t pid, std::vector<std::string> args, std::string
     if (args.empty()) { json = Err("test takes status|god on|off|mp on|off|refill|mark TEXT|knockout|revive"); return 1; }
     const std::string sub = args[0];
     std::ostringstream out;
+    if (sub == "dump") {
+        // test dump ADDR SIZE [SAMPLES] [INTERVAL_MS] [OUTFILE]: raw bytes of one address range, sample after sample.
+        if (args.size() < 3) { json = Err("test dump ADDR SIZE [SAMPLES] [INTERVAL_MS] [OUTFILE]"); return 1; }
+        const std::uint64_t addr = std::stoull(args[1], nullptr, 0);
+        const std::size_t size = static_cast<std::size_t>(std::stoul(args[2], nullptr, 0));
+        const int samples = args.size() > 3 ? std::stoi(args[3]) : 1, interval = args.size() > 4 ? std::stoi(args[4]) : 100;
+        if (!size || size > 0x10000 || samples < 1 || samples > 600) { json = Err("size 1..0x10000, samples 1..600"); return 1; }
+        HANDLE process = OpenProcess(PROCESS_VM_READ, FALSE, pid);
+        if (!process) { json = Err("OpenProcess failed"); return 1; }
+        std::string path = args.size() > 5 ? args[5] : "dump_" + std::to_string(pid) + ".bin";
+        std::vector<unsigned char> buf(size);
+        HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (file == INVALID_HANDLE_VALUE) { CloseHandle(process); json = Err("cannot write " + path); return 1; }
+        int ok = 0;
+        for (int i = 0; i < samples; ++i) {
+            if (i) std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(process, reinterpret_cast<LPCVOID>(addr), buf.data(), size, &got) || got != size) std::fill(buf.begin(), buf.end(), 0);
+            else ++ok;
+            DWORD w = 0; WriteFile(file, buf.data(), static_cast<DWORD>(size), &w, nullptr);
+        }
+        CloseHandle(file); CloseHandle(process);
+        out << "{\"ok\":" << (ok ? "true" : "false") << ",\"processId\":" << pid << ",\"samples\":" << samples << ",\"read\":" << ok << ",\"file\":\"" << path << "\"}";
+        json = out.str();
+        return ok ? 0 : 1;
+    }
     if (sub == "knockout" || sub == "revive" || sub == "downed") {
         View<dn::Channel> v(std::wstring(dn::kChannelPrefix) + std::to_wstring(pid));
         if (!v.p || v.p->magic != dn::kChannelMagic || v.p->version != dn::kChannelVersion) {

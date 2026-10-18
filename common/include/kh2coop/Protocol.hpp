@@ -8,7 +8,7 @@
 
 namespace kh2coop {
 
-inline constexpr std::uint16_t PROTOCOL_VERSION = 19;
+inline constexpr std::uint16_t PROTOCOL_VERSION = 20;
 
 // ===========================================================================
 // Protocol v14 adds RemoteHit (45) and TargetAuthority (46) (VUH-1515, enemy targeting of remote players)
@@ -205,6 +205,7 @@ inline constexpr std::size_t ENEMY_MOTION_MAX_ENTRIES = 32;
 inline constexpr std::size_t ENEMY_MOTION_ENTRY_BYTES = 31;
 inline constexpr std::size_t ENEMY_MOTION_HEADER_BYTES = 18; // epoch, sequence, hostFrame, count
 inline constexpr std::uint8_t ENEMY_MOTION_ALIVE = 1;
+inline constexpr std::uint8_t ENEMY_MOTION_HIDDEN = 2; // burrower underground on the host (actor+0x120 & 0x0A)
 // Sanity bounds (VUH-1515 review S3/S5): a host value outside these is refused,
 // never driven into a native call. Motion ids seen live are < 300; 4096 caps garbage.
 inline constexpr std::uint32_t ENEMY_MOTION_MAX_MOTION_ID = 4096;
@@ -218,7 +219,7 @@ struct EnemyMotionEntry {
     float motionTime {0.0f};          // actor+0x19C, frames
     Vec3 position {};                 // entity+0x30
     float rotationY {0.0f};           // entity+0x4C
-    std::uint8_t flags {ENEMY_MOTION_ALIVE}; // bit0 alive; other bits must be zero
+    std::uint8_t flags {ENEMY_MOTION_ALIVE}; // bit0 alive (required), bit1 hidden; other bits must be zero
 };
 struct EnemyMotion {
     std::uint32_t epoch {0};

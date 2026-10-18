@@ -83,19 +83,26 @@ inline constexpr std::uint32_t kFamilies[] = {kShadowObjectId, kHookBatObjectId,
                                               kDuskObjectId, kSamuraiObjectId, kDancerObjectId,
                                               kSilverRockObjectId, kIcyCubeObjectId, kAssassinObjectId,
                                               kRabidDogObjectId, kHammerFrameObjectId, kAerialChampObjectId, kBeffudlerObjectId};
-// Burrowers (Shadow, Neoshadow, Driller Mole) stay on their own AI on the friend's side: a driven copy
-// looks up but keeps the hidden-underground state its skipped brain would have cleared, so the
-// friend's attacks pass through it (2026-10-17, TT/HB Shadows: no friend hit landed while driven).
-// HP and deaths still follow the host.
+// Burrowers (Shadow, Neoshadow, Driller Mole): their AI sets actor+0x120 bits 0x0A while underground
+// (2026-10-18 host dump: 0x0A through burrow motions 161/162, 0 surfaced). A driven copy skips that AI,
+// so the host streams the bit (ENEMY_MOTION_HIDDEN) and the driver writes it; before that the copy kept
+// the underground state and the friend's attacks passed through it (2026-10-17).
+// KH2COOP_MIRROR_BURROWERS=0 keeps them on their own AI as before.
 inline constexpr std::uint32_t kBurrowers[] = {kShadowObjectId, kNeoshadowObjectId, kDrillerMoleObjectId};
+inline constexpr std::uintptr_t kBurrowStateOffset = 0x120;
+inline constexpr std::uint8_t kBurrowHiddenBits = 0x0A;
+inline bool IsBurrower(std::uint32_t objectId) noexcept {
+    for (const auto b : kBurrowers) if (objectId == b) return true;
+    return false;
+}
+bool MirrorBurrowers() noexcept;
 // KH2COOP_ENEMY_MIRROR_ALL=1 (2026-10-17, candidate): every regular enemy (objentry type 4) is
 // mirrored, not only the reviewed families; bosses (type 3, recorded as they spawn) and the
 // burrowers never are. State lives in EnemySync.cpp (MirrorAll: 0 off, 1 allowed, 2 a boss).
 int MirrorAll(std::uint32_t objectId) noexcept;
 void NoteBoss(std::uint32_t objectId) noexcept;
 inline bool FamilyAllowed(std::uint32_t objectId) noexcept {
-    for (const auto b : kBurrowers)
-        if (objectId == b) return false;
+    if (IsBurrower(objectId)) return MirrorBurrowers();
     if (const int all = MirrorAll(objectId)) return all == 1;
     for (const auto family : kFamilies)
         if (objectId == family) return true;
@@ -153,6 +160,7 @@ struct Sample {
     float motionTime = 0.0f;
     Vec3 position {};
     float rotationY = 0.0f;
+    std::uint8_t flags = 0;  // EnemyMotionEntry flags
 };
 
 struct Pose {
@@ -162,6 +170,7 @@ struct Pose {
     Vec3 position {};
     float rotationY = 0.0f;
     double cursor = 0.0;  // displayed host-frame cursor (integral)
+    bool hidden = false;  // burrower underground on the host
 };
 
 struct StreamStats {

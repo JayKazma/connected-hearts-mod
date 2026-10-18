@@ -1851,6 +1851,10 @@ void PublishHostMotion(std::uint32_t frame, const NativeCensus& census) {
         e.netId = static_cast<std::uint16_t>(s.spawnIndex + 1);
         e.objectId = s.objectId;
         e.flags = ENEMY_MOTION_ALIVE;
+        std::uint8_t burrow = 0;
+        if (enemymirror::IsBurrower(s.objectId) && ReadNative(native->actor + enemymirror::kBurrowStateOffset, burrow) &&
+            (burrow & enemymirror::kBurrowHiddenBits))
+            e.flags |= ENEMY_MOTION_HIDDEN;
         m.entries.push_back(e);
         if (g_mirrorTrace && (g_latencyTraceBudget || frame % enemymirror::kTraceEvery == 0) && g_log)
             g_log("[enemy-mirror] trace-host netId=%u hostFrame=%u pos=%.1f,%.1f,%.1f motion=%u time=%.1f", e.netId, frame,
@@ -4290,7 +4294,7 @@ void Install(uintptr_t exeBase, LogFn log, StatDeltaFn applyStatDelta, TakeDamag
     char mirrorAll[2] {};
     g_mirrorAllMobs = g_mirrorRequested &&
         GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR_ALL", mirrorAll, sizeof(mirrorAll)) == 1 && mirrorAll[0] == '1';
-    if (g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses and burrowers stay native");
+    if (g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses stay native; burrowers %s", enemymirror::MirrorBurrowers() ? "mirrored with their underground state" : "native (KH2COOP_MIRROR_BURROWERS=0)");
     char delayText[16] {};
     const DWORD delayLength = GetEnvironmentVariableA("KH2COOP_ENEMY_CURSOR_DELAY_FRAMES", delayText, sizeof(delayText));
     const auto delay = delayLength > 0 && delayLength < sizeof(delayText)
@@ -5242,6 +5246,14 @@ int MirrorAll(std::uint32_t objectId) noexcept {
     if (!enemysync::g_mirrorAllMobs || objectId == 0) return 0;
     for (unsigned i = 0; i < enemysync::g_bossCount; ++i) if (enemysync::g_bossIds[i] == objectId) return 2;
     return 1;
+}
+// Default on; KH2COOP_MIRROR_BURROWERS=0 keeps Shadows, Neoshadows and Driller Moles on their own AI.
+bool MirrorBurrowers() noexcept {
+    static const bool on = [] {
+        char v[2] {};
+        return !(GetEnvironmentVariableA("KH2COOP_MIRROR_BURROWERS", v, sizeof(v)) == 1 && v[0] == '0');
+    }();
+    return on;
 }
 void NoteBoss(std::uint32_t objectId) noexcept {
     for (unsigned i = 0; i < enemysync::g_bossCount; ++i) if (enemysync::g_bossIds[i] == objectId) return;

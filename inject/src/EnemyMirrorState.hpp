@@ -72,7 +72,7 @@ public:
                 ++stats_.staleSamples;
                 continue;
             }
-            t.ring[t.head] = {m.hostFrame, e.objectId, e.motionId, e.motionTime, e.position, e.rotationY};
+            t.ring[t.head] = {m.hostFrame, e.objectId, e.motionId, e.motionTime, e.position, e.rotationY, e.flags};
             t.head = (t.head + 1) % kRing;
             if (t.count < kRing) ++t.count;
             t.lastArrival = localFrame;
@@ -161,6 +161,7 @@ public:
         out.netId = netId;
         out.objectId = s0->objectId;
         out.cursor = c;
+        out.hidden = (s0->flags & ENEMY_MOTION_HIDDEN) != 0;
         if (!s1) {
             out.position = s0->position;
             out.rotationY = s0->rotationY;
