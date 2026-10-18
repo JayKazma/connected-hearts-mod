@@ -88,7 +88,7 @@ void read(ByteReader& r, RoomState& rs);
 void read(ByteReader& r, AvatarState& a);
 
 // Protocol.hpp structs
-inline constexpr std::size_t AVATAR_RELAY_PAYLOAD_SIZE = 143; // v18: 8 (owner) + 135 (AvatarState incl. cast, weapon, event and trigger fields)
+inline constexpr std::size_t AVATAR_RELAY_PAYLOAD_SIZE = 172; // v19: 8 (owner) + 164 (AvatarState incl. cast, weapon, event, trigger and ball fields)
 void write(ByteWriter& w, const AvatarRelay& a);
 void read(ByteReader& r, AvatarRelay& a);
 void write(ByteWriter& w, const SessionActor& sa);
