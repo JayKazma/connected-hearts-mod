@@ -83,7 +83,14 @@ inline constexpr std::uint32_t kFamilies[] = {kShadowObjectId, kHookBatObjectId,
                                               kDuskObjectId, kSamuraiObjectId, kDancerObjectId,
                                               kSilverRockObjectId, kIcyCubeObjectId, kAssassinObjectId,
                                               kRabidDogObjectId, kHammerFrameObjectId, kAerialChampObjectId, kBeffudlerObjectId};
+// Burrowers (Shadow, Neoshadow, Driller Mole) stay on their own AI on the friend's side: a driven copy
+// looks up but keeps the hidden-underground state its skipped brain would have cleared, so the
+// friend's attacks pass through it (2026-10-17, TT/HB Shadows: no friend hit landed while driven).
+// HP and deaths still follow the host.
+inline constexpr std::uint32_t kBurrowers[] = {kShadowObjectId, kNeoshadowObjectId, kDrillerMoleObjectId};
 inline bool FamilyAllowed(std::uint32_t objectId) noexcept {
+    for (const auto b : kBurrowers)
+        if (objectId == b) return false;
     for (const auto family : kFamilies)
         if (objectId == family) return true;
     return false;
