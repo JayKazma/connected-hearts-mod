@@ -51,6 +51,10 @@
 namespace kh2coop {
 namespace inject {
 namespace enemysync {
+// KH2COOP_ENEMY_MIRROR_ALL (see EnemyMirrorPose.hpp): read by enemymirror::MirrorAll.
+bool g_mirrorAllMobs = false;
+std::uint32_t g_bossIds[32] {};
+unsigned g_bossCount = 0;
 namespace {
 
 enum class Role { Off, Host, Client };
@@ -4284,9 +4288,9 @@ void Install(uintptr_t exeBase, LogFn log, StatDeltaFn applyStatDelta, TakeDamag
     char mirror[2] {};
     g_mirrorRequested = GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR", mirror, sizeof(mirror)) == 1 && mirror[0] == '1';
     char mirrorAll[2] {};
-    enemymirror::g_mirrorAllMobs = g_mirrorRequested &&
+    g_mirrorAllMobs = g_mirrorRequested &&
         GetEnvironmentVariableA("KH2COOP_ENEMY_MIRROR_ALL", mirrorAll, sizeof(mirrorAll)) == 1 && mirrorAll[0] == '1';
-    if (enemymirror::g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses and burrowers stay native");
+    if (g_mirrorAllMobs && g_log) g_log("[enemy-mirror] all regular enemies mirrored (KH2COOP_ENEMY_MIRROR_ALL=1); bosses and burrowers stay native");
     char delayText[16] {};
     const DWORD delayLength = GetEnvironmentVariableA("KH2COOP_ENEMY_CURSOR_DELAY_FRAMES", delayText, sizeof(delayText));
     const auto delay = delayLength > 0 && delayLength < sizeof(delayText)
@@ -5232,3 +5236,15 @@ RemoteHitStats GetRemoteHitStats() noexcept { return g_remoteHitStats; }
 } // namespace enemysync
 } // namespace inject
 } // namespace kh2coop
+
+namespace kh2coop::inject::enemymirror {
+int MirrorAll(std::uint32_t objectId) noexcept {
+    if (!enemysync::g_mirrorAllMobs || objectId == 0) return 0;
+    for (unsigned i = 0; i < enemysync::g_bossCount; ++i) if (enemysync::g_bossIds[i] == objectId) return 2;
+    return 1;
+}
+void NoteBoss(std::uint32_t objectId) noexcept {
+    for (unsigned i = 0; i < enemysync::g_bossCount; ++i) if (enemysync::g_bossIds[i] == objectId) return;
+    if (enemysync::g_bossCount < 32) enemysync::g_bossIds[enemysync::g_bossCount++] = objectId;
+}
+} // namespace kh2coop::inject::enemymirror

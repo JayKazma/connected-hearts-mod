@@ -93,6 +93,9 @@ if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         src/EnemySync.cpp src/NativeOwnedEmitterInstall.cpp src/NativeSpawnController.cpp src/PartnerCard.cpp
         src/ProgressSync.cpp src/RenderHook.cpp src/SaveGuard.cpp src/SteamBrokerNative.cpp src/Warp.cpp
         PROPERTIES COMPILE_OPTIONS "-fno-async-exceptions")
+    # clang 18 at -O2/-O3 hangs compiling EntityHook.cpp after small, unrelated edits (its SEH-heavy
+    # hooks); -O1 builds it in seconds.
+    set_source_files_properties(src/EntityHook.cpp PROPERTIES COMPILE_OPTIONS "-O1")
 endif()
 
 if(MSVC)
