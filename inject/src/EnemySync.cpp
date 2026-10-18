@@ -123,6 +123,7 @@ struct Spawn {
     bool killed = false;      // client: native HP confirmed dead
     bool deathAttempted = false; // at most one native lethal call per local spawn
     int netId = -1;           // client: matched host enemy
+    std::uint32_t unboundFrames = 0; // client: resolved frames alive here with no host enemy bound
     ordinarybinding::State ordinaryBinding {};
     int ordinaryLogReason = -1, ordinaryLogCandidate = -1;
 };
@@ -1908,6 +1909,47 @@ void PopulationPrune(std::uint32_t frame, const NativeCensus& census) {
             g_population.Forget(f.id.actor);
         }
     }
+}
+
+// Client, after a successful ClientFrame: a local enemy the host's game never had. A living mob
+// (objentry type 4) unbound for kExtraFrames resolved frames, while the host's complete manifest has
+// no living enemy of its object id left unbound here, is an extra of this game alone (the friend's
+// extra Shadow); it is killed the way a host death is applied (native lethal, death animation, its
+// own drops). One per frame.
+constexpr std::uint32_t kExtraFrames = 900;
+struct NativeRecordWriteCheck;
+bool ApplyNativeDeath(const NativeEnemy& expected, int hp, std::uint32_t generation, const NativeRecordWriteCheck* record);
+void ExtrasTick(std::uint32_t frame, const NativeCensus& census) {
+    if (g_role != Role::Client || !g_host.arrived || !g_host.manifestComplete || !g_applyStatDelta) return;
+    if (g_resyncWriteFence != ResyncWriteFence::None || !SafeNativeGameplay()) return;
+    const auto generation = WorldSessionGeneration();
+    if (!generation) return;
+    Spawn* target = nullptr;
+    for (Spawn& s : g_inst.spawns) {
+        if (!s.present || s.killed || s.deathAttempted || s.objectId == 0 || s.lastHp <= 0) { s.unboundFrames = 0; continue; }
+        if (s.netId >= 0) { s.unboundFrames = 0; continue; }
+        if (s.objectType != 4) continue; // bosses and others: never
+        if (++s.unboundFrames <= kExtraFrames || target) continue;
+        int hostUnbound = 0;
+        for (const auto& [id, h] : g_host.enemies) {
+            if (h.dead || h.objectId != s.objectId || h.battleProgram != g_inst.btl) continue;
+            bool bound = false;
+            for (const Spawn& o : g_inst.spawns) if (o.present && o.netId == id) { bound = true; break; }
+            if (!bound) ++hostUnbound;
+        }
+        if (hostUnbound == 0) target = &s;
+    }
+    if (!target) return;
+    const auto* sampled = FindNativeEnemy(census, *target);
+    NativeEnemy native;
+    bool isEnemy = false;
+    target->deathAttempted = true;
+    if (!sampled || !ReadNativeEnemy(target->actor, native, isEnemy) || !isEnemy || !SameNativeIdentity(*sampled, native) || native.hp <= 0) return;
+    const int before = native.hp;
+    const bool ok = ApplyNativeDeath(native, before, generation, nullptr);
+    if (g_log) g_log("[enemysync] client: extra local enemy (spawn %u objectId %u at (%.0f,%.0f,%.0f)) has no host match after %u frames; %s",
+                     target->spawnIndex, target->objectId, target->spawnPos.x, target->spawnPos.y, target->spawnPos.z,
+                     target->unboundFrames, ok ? "removed" : "removal FAILED");
 }
 
 // Client, after a successful ClientFrame (bindings resolved for this census).
@@ -4468,6 +4510,7 @@ void OnFrameStart(std::uint32_t frame) {
         }
         if (!ClientFrame(census)) { DrainPendingSpawnTrace(false); return; }
         PopulationTick(frame, census);  // VUH-1788 (default off)
+        ExtrasTick(frame, census);
     }
     PublishAppliedHash(frame, census);
     TickNativeResync(frame, true);
