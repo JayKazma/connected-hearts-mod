@@ -496,6 +496,10 @@ namespace objentry {
     // 7 world point, 8 field object, 20 shop point, 22 prize.
     constexpr std::uint8_t TYPE_BOSS    = 3;    // [GHIDRA]
     constexpr std::uint8_t TYPE_MOB     = 4;    // [CONFIRMED] Parlor Ambush Shadows
+    constexpr std::uint8_t TYPE_LARGE_BOSS = 12; // [CONFIRMED] L_BOSS: Twilight Thorn B_EX100 (2026-10-18)
+    constexpr std::uint8_t TYPE_LARGE_MOB  = 21; // [OPENKH] L_ENEMY
+    constexpr bool IsBossType(std::uint32_t t) { return t == TYPE_BOSS || t == TYPE_LARGE_BOSS; }
+    constexpr bool IsCombatType(std::uint32_t t) { return t == TYPE_BOSS || t == TYPE_MOB || t == TYPE_LARGE_BOSS || t == TYPE_LARGE_MOB; }
     constexpr std::uint64_t NAME        = 0x08; // char[32] [CONFIRMED] object name, e.g. "P_EX100"
     constexpr std::uint64_t MSET_NAME   = 0x28; // char[32] [CONFIRMED] motion-set name, e.g. "P_EX100.mset"
 }

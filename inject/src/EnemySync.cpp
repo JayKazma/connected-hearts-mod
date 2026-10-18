@@ -517,7 +517,7 @@ bool ReadNativeEnemy(uintptr_t actor, NativeEnemy& enemy, bool& isEnemy) {
     if (enemy.objentry <= g_exeBase || enemy.objentry >= g_exeBase + 0x3000000) return false;
     std::uint8_t type = 0;
     if (!ReadNative(enemy.objentry + offsets::objentry::TYPE_FLAGS, type)) return false;
-    if (type != offsets::objentry::TYPE_BOSS && type != offsets::objentry::TYPE_MOB) return true;
+    if (!offsets::objentry::IsCombatType(type)) return true;
     char prefix[2] {};
     if (!CopyNative(enemy.objentry + offsets::objentry::NAME, prefix, sizeof(prefix))) return false;
     if (prefix[0] == 'F' && prefix[1] == '_') return true;
@@ -698,7 +698,7 @@ bool IsEnemy(uintptr_t actor) {
     const uintptr_t obj = ObjEntry(actor);
     if (!obj || !HpPtr(actor)) return false;
     const auto type = Read<std::uint8_t>(obj + offsets::objentry::TYPE_FLAGS);
-    if (type != offsets::objentry::TYPE_BOSS && type != offsets::objentry::TYPE_MOB) return false;
+    if (!offsets::objentry::IsCombatType(type)) return false;
     const char* name = reinterpret_cast<const char*>(obj + offsets::objentry::NAME);
     return !(name[0] == 'F' && name[1] == '_');
 }
@@ -1735,7 +1735,7 @@ bool HostFrame(std::uint32_t frame, const std::vector<std::size_t>& newSpawns,
         if (refilled) {
             s.deathSent = true;
             SYNC_LOG("[enemysync] host: spawn %u despawned, refilled at its point", s.spawnIndex);
-        } else if (s.objectType == offsets::objentry::TYPE_BOSS && s.lastHp > 0) {
+        } else if (offsets::objentry::IsBossType(s.objectType) && s.lastHp > 0) {
             // Bosses remove bodies that aren't deaths (Larxene's duplicates, teleports, phases). The
             // body's HP is often shared with the boss's other bodies, so a "death" here would kill the
             // boss on the other games (2026-10-18, Larxene AS: the client won while the host fought on).
@@ -1980,7 +1980,7 @@ void BossDeathTick(std::uint32_t frame, const NativeCensus& census) {
     const auto generation = WorldSessionGeneration();
     if (!generation) return;
     for (Spawn& s : g_inst.spawns) {
-        if (!s.present || s.killed || s.deathAttempted || s.objectType != offsets::objentry::TYPE_BOSS || s.lastHp <= 0) continue;
+        if (!s.present || s.killed || s.deathAttempted || !offsets::objentry::IsBossType(s.objectType) || s.lastHp <= 0) continue;
         bool hostDead = false;
         for (const auto& [id, h] : g_host.enemies)
             if (h.dead && h.objectId == s.objectId && h.battleProgram == g_inst.btl) { hostDead = true; break; }
@@ -2565,7 +2565,7 @@ bool CaptureHostResync(std::uint32_t frame, ResyncSnapshot& snapshot, ProducerWo
         snapshot.recordDefinitions.push_back(recordsBefore.entries[i].content);
     for (const auto& spawn : g_inst.spawns) {
         if (!spawn.announced || spawn.spawnIndex == UINT16_MAX ||
-            (spawn.objectType != offsets::objentry::TYPE_MOB && spawn.objectType != offsets::objentry::TYPE_BOSS)) return false;
+            !offsets::objentry::IsCombatType(spawn.objectType)) return false;
         ResyncEnemyState row;
         row.identity = {static_cast<std::uint16_t>(spawn.spawnIndex + 1), g_inst.btl,
                         spawn.spawnIndex, spawn.objectId, spawn.spawnPos};
@@ -3693,7 +3693,7 @@ bool ResyncFinalWriteContext(const NativeRecordWriteCheck& check) {
 }
 bool ResyncNativeSampleCurrent(const NativeEnemy& expected) {
     return expected.hp > 0 && expected.maxHp > 0 && expected.hp <= expected.maxHp &&
-        (expected.objectType == offsets::objentry::TYPE_MOB || expected.objectType == offsets::objentry::TYPE_BOSS) &&
+        offsets::objentry::IsCombatType(expected.objectType) &&
         Read<std::uint8_t>(expected.objentry + offsets::objentry::TYPE_FLAGS) == expected.objectType &&
         Read<std::uint16_t>(expected.objentry + offsets::objentry::NAME) != 0x5F46 && // F_ is noncombat
         Read<std::int32_t>(expected.status) == expected.hp && Read<std::int32_t>(expected.status + 4) == expected.maxHp;
@@ -4172,7 +4172,7 @@ std::vector<std::size_t> TrackSpawns(const NativeCensus& census) {
             s.identityRead = now.identityRead;
             s.objectId = native.objectId;
             s.objectType = native.objectType;
-            if (s.objectType == offsets::objentry::TYPE_BOSS) enemymirror::NoteBoss(s.objectId);
+            if (offsets::objentry::IsBossType(s.objectType)) enemymirror::NoteBoss(s.objectId);
             s.spawnPos = native.position;
             g_inst.spawns.push_back(s);
             index = g_inst.spawns.size() - 1;
@@ -4244,7 +4244,7 @@ bool ProcessHostHitClaims(NativeCensus& census) {
             // A boss's bodies come and go quickly (duplicates, teleports): the claimed body may already
             // be gone here. Any present body of the same boss takes the hit instead.
             for (auto it = g_inst.spawns.begin(); it != g_inst.spawns.end(); ++it) {
-                if (it->objectType != offsets::objentry::TYPE_BOSS || it->objectId != claim.objectId ||
+                if (!offsets::objentry::IsBossType(it->objectType) || it->objectId != claim.objectId ||
                     !it->present || it->deathSent) continue;
                 const NativeEnemy* row = FindNativeEnemy(census, *it);
                 if (row && row->hp > 0) { target = it; sampled = row; break; }
@@ -4683,7 +4683,7 @@ bool RecordLocalPlayerEnemyHit(const LocalPlayerEnemyHit& hit) noexcept {
         NativeEnemy bossNative;
         bool bossEnemy = false;
         const bool boss = ReadNativeEnemy(hit.victim, bossNative, bossEnemy) && bossEnemy &&
-                          bossNative.objectType == offsets::objentry::TYPE_BOSS && bossNative.hp > 0;
+                          offsets::objentry::IsBossType(bossNative.objectType) && bossNative.hp > 0;
         const auto scopeReady = [&] {
             const bool ready = EnsureClientClaimScope();
             return boss ? (g_clientClaimHold.bound && !g_clientClaimHold.poisoned) : ready;

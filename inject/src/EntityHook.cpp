@@ -770,7 +770,7 @@ static bool IsEnemyVictim(uintptr_t actor) {
     const auto obj = *reinterpret_cast<const uintptr_t*>(actor + offsets::actor::OBJENTRY_PTR);
     if (obj <= g_exeBase || obj >= g_exeBase + 0x3000000) return false;
     const uint8_t type = *reinterpret_cast<const uint8_t*>(obj + offsets::objentry::TYPE_FLAGS);
-    return type == offsets::objentry::TYPE_BOSS || type == offsets::objentry::TYPE_MOB;
+    return offsets::objentry::IsCombatType(type);
 }
 
 static bool SyncDropsHit(void* victim) {
@@ -3107,7 +3107,7 @@ static damagepolicy::ActorClass ClassifyDamageActor(const nativehittrace::ActorS
     if (DamageReservedActor(actor.actor, context, roster)) return ActorClass::RemoteRepresentation;
     if (actor.type == 1)
         return NativeAiPermission(actor, context, roster) ? ActorClass::NativeCompanion : ActorClass::Unknown;
-    if ((actor.type == offsets::objentry::TYPE_BOSS || actor.type == offsets::objentry::TYPE_MOB) &&
+    if (offsets::objentry::IsCombatType(actor.type) &&
         actor.namePrefix != 0x5F46 && actor.objectId && actor.hp > 0 && actor.maxHp > 0) return ActorClass::Enemy;
     // A typed, checked native actor outside the player/companion/enemy classes
     // may affect the local victim, but never receives host-enemy permission.
