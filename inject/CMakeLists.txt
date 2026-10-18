@@ -80,6 +80,7 @@ add_library(kh2coop_inject SHARED
     src/DamagePolicy.cpp
     src/AllyHit.cpp
     src/FieldObjects.cpp
+    src/TestKit.cpp
     src/SafeMemory.cpp
     version.rc
 )

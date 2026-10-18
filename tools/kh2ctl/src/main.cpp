@@ -40,6 +40,7 @@
 
 namespace kh2coop {
 std::string queueWorldResyncCommand(std::uint32_t pid, std::uint8_t targetMask);
+int RunTestCommand(std::uint32_t pid, std::vector<std::string> args, std::string& json);
 }
 
 namespace {
@@ -166,6 +167,12 @@ std::filesystem::path RepoRoot() {
     // The launcher supplies package-root cwd; make the inherited log path
     // absolute before KH2 starts with its own game-directory cwd.
     return std::filesystem::current_path();
+#elif defined(KH2COOP_TEST_KIT_TOOL)
+    // chtest lives in <install>\bin; rig state (owned.txt, shots, clips) goes under <install>\build\rig.
+    std::array<wchar_t, 32768> module {};
+    const DWORD count = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+    if (count == 0 || count >= module.size()) return std::filesystem::current_path();
+    return std::filesystem::path(module.data()).parent_path().parent_path();
 #else
     return std::filesystem::path(KH2COOP_SOURCE_DIR);
 #endif
@@ -1287,7 +1294,7 @@ bool WriteMailboxPulse(std::uint32_t mailboxSlot, const InputFrame& frame,
 // playing), kill rig-owned instances, rebuild the DLL, launch and inject.
 CommandResult RigRestart(bool noBuild, bool killOnly, const LaunchOptions& options,
                          const char* command) {
-#ifdef KH2COOP_PORTABLE_PACKAGE
+#if defined(KH2COOP_PORTABLE_PACKAGE) || defined(KH2COOP_TEST_KIT_TOOL)
     // A friend package has frozen products and no source tree. Refuse before
     // discovery or termination; even direct callers cannot rebuild/restart it.
     (void)noBuild;
@@ -2966,6 +2973,7 @@ void PrintUsage() {
         << "  world-resync --pid N --slot 1|2|all  queue a host recovery request\n"
         << "  hit drop --on|--off [--attacker A] [--victim V] [--enemies] | hit claims [--last N]\n"
         << "  hit damage --victim V --amount N | hit kill --victim V\n"
+        << "  test status|god on|off|mp on|off|refill|mark TEXT|knockout|revive|downed\n"
         << "  dump --out x.dmp          minidump of a live instance (hang evidence)\n"
         << "  crash                     fault a rig-launched instance on purpose (tests)\n"
         << "       [--timeout-ms N]     load a room (programs default to the save's)\n"
@@ -3090,6 +3098,10 @@ int main(int argc, char* argv[]) {
             result = CmdFps(std::move(args));
         } else if (command == "warp") {
             result = CmdWarp(std::move(args));
+        } else if (command == "test") {
+            std::string json;
+            const int code = kh2coop::RunTestCommand(ResolveTargetPid(), args, json);
+            result = {code, json};
         } else if (command == "world-resync") {
             result = CmdWorldResync(std::move(args));
         } else if (command == "dump") {

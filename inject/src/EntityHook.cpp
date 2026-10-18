@@ -45,6 +45,7 @@
 #include "DamagePolicy.hpp"
 #include "EnemyTargetRemote.hpp" // VUH-1515 (default off)
 #include "FieldObjects.hpp"
+#include "TestKit.hpp"
 #include "AllyHit.hpp" // ally player-to-player hits (default off)
 #include "kh2coop/KH2Offsets.hpp"
 #include "kh2coop/InputMailbox.hpp"
@@ -3302,6 +3303,7 @@ static bool UpdatePuppetSuspension() {
 static void PollPuppetPoses() {
     const bool suspended = UpdatePuppetSuspension();
     fieldobj::Tick(g_frameCounter, warp::LoadSerial(), !suspended && !LocalPaused()); // once per frame, like this
+    testkit::Tick(g_frameCounter);
     if (suspended || !hud::ValidAuthority(enemysync::CapturePuppetAuthority()))
         render::InvalidateCoopHud();
     if (!g_avatarBridge.IsOpen()) return;
@@ -5779,6 +5781,7 @@ bool Initialize(uintptr_t exeBase) {
     menuparty::Install(exeBase);    // the other player's Sora is not editable from the pause menu
     // Ally player-to-player hits (KH2COOP_ALLY_HIT, default off): after the handle resolver is verified.
     fieldobj::Install(exeBase, &Log, g_resolveHandle);
+    testkit::Install(exeBase, &Log);
     allyhit::Install(exeBase, &Log, g_resolveHandle, []() -> uint32_t { return g_frameCounter; });
     // VUH-1519 R1/R2: party-native stays requested only if its hook, private status and the
     // module's own neutral-input state are all ready (no-op when party-native is off).
