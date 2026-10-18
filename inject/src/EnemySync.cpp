@@ -1735,6 +1735,12 @@ bool HostFrame(std::uint32_t frame, const std::vector<std::size_t>& newSpawns,
         if (refilled) {
             s.deathSent = true;
             SYNC_LOG("[enemysync] host: spawn %u despawned, refilled at its point", s.spawnIndex);
+        } else if (s.objectType == offsets::objentry::TYPE_BOSS && s.lastHp > 0) {
+            // Bosses remove bodies that aren't deaths (Larxene's duplicates, teleports, phases). The
+            // body's HP is often shared with the boss's other bodies, so a "death" here would kill the
+            // boss on the other games (2026-10-18, Larxene AS: the client won while the host fought on).
+            s.deathSent = true;
+            SYNC_LOG("[enemysync] host: boss spawn %u (objectId %u) gone with hp %d: not a death", s.spawnIndex, s.objectId, s.lastHp);
         } else if (s.lastHp <= 0 || now - s.goneSinceMs > DESPAWN_GRACE_MS) {
             EnemyDeath d;
             d.epoch = g_epoch;
@@ -4201,11 +4207,21 @@ bool ProcessHostHitClaims(NativeCensus& census) {
             LogClaim("reject", claim, "sequence already consumed");
             continue;
         }
-        const auto target = std::find_if(g_inst.spawns.begin(), g_inst.spawns.end(), [&](const Spawn& spawn) {
+        auto target = std::find_if(g_inst.spawns.begin(), g_inst.spawns.end(), [&](const Spawn& spawn) {
             return static_cast<std::uint32_t>(spawn.spawnIndex) + 1 == claim.netId &&
                    spawn.objectId == claim.objectId && spawn.present && spawn.announced && !spawn.deathSent;
         });
         const NativeEnemy* sampled = target == g_inst.spawns.end() ? nullptr : FindNativeEnemy(census, *target);
+        if (!sampled) {
+            // A boss's bodies come and go quickly (duplicates, teleports): the claimed body may already
+            // be gone here. Any present body of the same boss takes the hit instead.
+            for (auto it = g_inst.spawns.begin(); it != g_inst.spawns.end(); ++it) {
+                if (it->objectType != offsets::objentry::TYPE_BOSS || it->objectId != claim.objectId ||
+                    !it->present || it->deathSent) continue;
+                const NativeEnemy* row = FindNativeEnemy(census, *it);
+                if (row && row->hp > 0) { target = it; sampled = row; break; }
+            }
+        }
         NativeEnemy native;
         bool isEnemy = false;
         if (!sampled || !ReadNativeEnemy(sampled->actor, native, isEnemy) || !isEnemy ||
