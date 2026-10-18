@@ -1455,10 +1455,14 @@ bool ReleaseClientClaims(std::uint32_t frame) {
             !SameNativeIdentity(*native, repeated) || repeated.objectType != native->objectType ||
             repeated.hp != host.hp || repeated.maxHp != host.maxHp) { if (g_log && native) g_log("[client-claims-why] netId=%d local hp=%d/%d host hp=%d/%d", id, native->hp, native->maxHp, host.hp, host.maxHp); ClaimHoldWhy("local enemy HP differs from host HP", frame); return false; }
     }
-    // All current native combat rows must be accounted for, including extras
-    // and dying rows. Authoritative empty-set release is intentionally absent.
-    if (!living || living != census.enemies.size()) { if (g_log) g_log("[client-claims-why] host living=%zu local enemies=%zu", living, census.enemies.size()); ClaimHoldWhy("living count mismatch between host manifest and local enemies", frame); return false; }
+    // All current living native combat rows must be accounted for, extras included. Dying rows (HP 0,
+    // still in the list for their death animation) can't take a hit; counting them held every claim
+    // for the length of each death after a kill. Authoritative empty-set release is intentionally absent.
+    std::size_t localLiving = 0;
+    for (const auto& native : census.enemies) if (native.hp > 0) ++localLiving;
+    if (!living || living != localLiving) { if (g_log) g_log("[client-claims-why] host living=%zu local living=%zu (rows %zu)", living, localLiving, census.enemies.size()); ClaimHoldWhy("living count mismatch between host manifest and local enemies", frame); return false; }
     for (const auto& native : census.enemies) {
+        if (native.hp <= 0) continue; // dying
         unsigned matches = 0;
         for (const auto& spawn : g_inst.spawns) {
             const auto host = g_host.enemies.find(static_cast<std::uint16_t>(spawn.netId));
@@ -1484,6 +1488,7 @@ bool ReleaseClientClaims(std::uint32_t frame) {
             static_cast<unsigned long long>(host->second.hpSourceSequence));
     }
     for (const auto& native : census.enemies) {
+        if (native.hp <= 0) continue; // dying: may leave the list at any time
         NativeEnemy repeated; bool combat = false;
         if (!ReadNativeEnemy(native.actor, repeated, combat) || !combat ||
             !SameNativeIdentity(native, repeated) || native.objectType != repeated.objectType ||
@@ -1916,7 +1921,7 @@ void PopulationPrune(std::uint32_t frame, const NativeCensus& census) {
 // no living enemy of its object id left unbound here, is an extra of this game alone (the friend's
 // extra Shadow); it is killed the way a host death is applied (native lethal, death animation, its
 // own drops). One per frame.
-constexpr std::uint32_t kExtraFrames = 900;
+constexpr std::uint32_t kExtraFrames = 600;
 struct NativeRecordWriteCheck;
 bool ApplyNativeDeath(const NativeEnemy& expected, int hp, std::uint32_t generation, const NativeRecordWriteCheck* record);
 void ExtrasTick(std::uint32_t frame, const NativeCensus& census) {
