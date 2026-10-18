@@ -75,6 +75,7 @@ struct Driven {
     // Driven updates whose brain was not called (hit-stop, reaction states, another path): rev-2 F3.
     std::uint64_t noBrain = 0, maxNoBrainRun = 0;
     std::uint64_t cullHolds = 0;  // VUH-1788: native removals refused for this copy
+    bool holding = false;         // this actor holds the local player (grab); its own AI runs until it lets go
 };
 struct BrainHook { uintptr_t target = 0; Brain original = nullptr; };
 using Predicate = bool(__fastcall*)(void* handler, void* actor);
@@ -439,6 +440,17 @@ void PreUpdate(uintptr_t actor) {
     }
     if (enemysync::PopulationRequested()) (void)EnsureCullHook(actor);  // bound copies, driven or not
     if (drive && !EnsureBrainHook(actor)) drive = false;
+    // A boss that grabs the local player owns the player's motion (player+0x2B0 = the holder). Copying
+    // the host's pose then never ends the grab, so the local AI keeps the boss until it lets go.
+    {
+        uintptr_t holder = 0;
+        const bool holds = g_soraActor && ReadHitTrace(g_soraActor + 0x2B0, holder) && holder == actor;
+        if (holds != d->holding) {
+            d->holding = holds;
+            Log("[enemy-mirror] netId=%u %s the local player (frame %u)", d->netId, holds ? "holds" : "released", g_frameCounter);
+        }
+        if (holds) drive = false;
+    }
     NoteSeen(actor, *d, drive);
     if (!drive) {
         if (d->running) EndRun(*d, "release");
