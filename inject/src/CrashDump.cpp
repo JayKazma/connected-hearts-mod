@@ -24,6 +24,27 @@ volatile LONG g_dumping = 0;
 using SetFilterFn = LPTOP_LEVEL_EXCEPTION_FILTER(WINAPI*)(LPTOP_LEVEL_EXCEPTION_FILTER);
 SetFilterFn g_origSetFilter = nullptr;
 
+// A stack overflow leaves the faulting thread no room for MiniDumpWriteDump (empty .dmp, 2026-10-18), so the
+// dump is written from a fresh thread while the faulting one waits.
+struct DumpJob { EXCEPTION_POINTERS* info; DWORD tid; HANDLE file; BOOL written; };
+DWORD WINAPI DumpThread(void* p) {
+    auto* job = static_cast<DumpJob*>(p);
+    MINIDUMP_EXCEPTION_INFORMATION mei {job->tid, job->info, FALSE};
+    const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo |
+                                                 MiniDumpWithUnloadedModules);
+    job->written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), job->file, type,
+                                     job->info ? &mei : nullptr, nullptr, nullptr);
+    return 0;
+}
+BOOL WriteDumpFromThread(EXCEPTION_POINTERS* info, HANDLE file) {
+    DumpJob job {info, GetCurrentThreadId(), file, FALSE};
+    HANDLE t = CreateThread(nullptr, 1 << 20, &DumpThread, &job, 0, nullptr);
+    if (!t) return FALSE;
+    WaitForSingleObject(t, 60000);
+    CloseHandle(t);
+    return job.written;
+}
+
 LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* info) {
     // One dump per process, even if several threads fault at once.
     if (InterlockedExchange(&g_dumping, 1) == 0) {
@@ -39,12 +60,7 @@ LONG WINAPI OnUnhandled(EXCEPTION_POINTERS* info) {
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
         BOOL written = FALSE;
         if (file != INVALID_HANDLE_VALUE) {
-            MINIDUMP_EXCEPTION_INFORMATION mei {GetCurrentThreadId(), info, FALSE};
-            const auto type = static_cast<MINIDUMP_TYPE>(
-                MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo |
-                MiniDumpWithUnloadedModules);
-            written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
-                                        info ? &mei : nullptr, nullptr, nullptr);
+            written = WriteDumpFromThread(info, file);
             CloseHandle(file);
         }
         if (g_log) {
@@ -126,6 +142,31 @@ LONG CALLBACK OnFirstChance(EXCEPTION_POINTERS* info) {
         MEMORY_BASIC_INFORMATION mbi {};
         if (VirtualQuery(sp, &mbi, sizeof(mbi)) == sizeof(mbi))
             g_log("[crash] stack region base=%p alloc=%p size=0x%llX state=%lX type=%lX", mbi.BaseAddress, mbi.AllocationBase, static_cast<unsigned long long>(mbi.RegionSize), mbi.State, mbi.Type);
+        char rcx[MAX_PATH + 32]; Describe(reinterpret_cast<const void*>(ctx->Rcx), rcx, sizeof(rcx));
+        g_log("[crash] rcx points into %s", rcx);
+        HMODULE mods[512]; DWORD needed = 0;
+        if (EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) {
+            const unsigned n = needed / sizeof(HMODULE) < 512 ? needed / sizeof(HMODULE) : 512;
+            for (unsigned i = 0; i < n; ++i) {
+                char name[MAX_PATH] = "?"; GetModuleFileNameA(mods[i], name, MAX_PATH);
+                if (strstr(name, "Windows\\System32") || strstr(name, "WINDOWS\\SYSTEM32") || strstr(name, "Windows\\SYSTEM32")) continue;
+                g_log("[crash] module %s (%p)", name, reinterpret_cast<void*>(mods[i]));
+            }
+            g_log("[crash] %u modules loaded", n);
+        }
+    }
+    if (code == EXCEPTION_STACK_OVERFLOW) {  // the unhandled filter may never run for this one; dump now
+        char dir[MAX_PATH] = ".";
+        const DWORD n = GetEnvironmentVariableA("KH2COOP_LOG_DIR", dir, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) strcpy_s(dir, ".");
+        char path[MAX_PATH];
+        sprintf_s(path, "%s\\connected_hearts_overflow_%lu.dmp", dir, GetCurrentProcessId());
+        HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            const BOOL ok = WriteDumpFromThread(info, file);
+            CloseHandle(file);
+            g_log("[crash] stack overflow minidump %s: %s", ok ? "written" : "FAILED", path);
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
