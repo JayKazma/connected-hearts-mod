@@ -97,11 +97,11 @@ inline std::vector<Decision> Resolve(std::span<const Local> locals,
                 (!best || h.id > best->id)) best = &h;
         }
         // A boss is one body per object id on both games: when its first observation came after it moved
-        // (2026-10-18, Barbossa: 35 units), the only living host boss with that id is the match.
+        // (2026-10-18, Barbossa: 35 units), the only host boss with that id is the match.
         if (!best && l.boss && l.living) {
             const Host* only = nullptr; int hostCount = 0, localCount = 0;
-            for (const auto& h : hosts)
-                if (h.id > 0 && !h.dead && h.objectId == l.identity.objectId) { only = &h; ++hostCount; }
+            for (const auto& h : hosts)  // dead or alive: the death gate below still needs a continuous binding
+                if (h.id > 0 && h.objectId == l.identity.objectId) { only = &h; ++hostCount; }
             for (const auto& o : locals)
                 if (o.boss && o.living && o.identity.objectId == l.identity.objectId) ++localCount;
             if (hostCount == 1 && localCount == 1) best = only;
