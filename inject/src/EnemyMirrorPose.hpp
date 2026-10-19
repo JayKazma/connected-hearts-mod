@@ -103,7 +103,8 @@ bool MirrorBosses() noexcept;
 inline constexpr std::uint32_t kLexaeusObjectId = 2357;    // Lexaeus (AS), 2026-10-18: position, motion, hits, HP match
 inline constexpr std::uint32_t kTwilightThornObjectId = 307; // Twilight Thorn (B_EX100, type 12), 2026-10-18: candidate
 inline constexpr std::uint32_t kAxelOneObjectId = 2229;      // Axel I (B_EX110_SKIRMISH, Sandlot 02/05 programs 87), candidate
-inline constexpr std::uint32_t kMirroredBosses[] = {kLexaeusObjectId, kTwilightThornObjectId, kAxelOneObjectId};
+inline constexpr std::uint32_t kAxelTwoObjectId = 81;        // Axel II (B_EX110, Basement Hall 02/14 programs 137), candidate
+inline constexpr std::uint32_t kMirroredBosses[] = {kLexaeusObjectId, kTwilightThornObjectId, kAxelOneObjectId, kAxelTwoObjectId};
 inline bool BossMirrorReviewed(std::uint32_t objectId) noexcept {
     for (const auto b : kMirroredBosses) if (objectId == b) return true;
     return false;
