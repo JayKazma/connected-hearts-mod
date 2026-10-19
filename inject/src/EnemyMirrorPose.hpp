@@ -96,19 +96,17 @@ inline bool IsBurrower(std::uint32_t objectId) noexcept {
     return false;
 }
 bool MirrorBurrowers() noexcept;
-// KH2COOP_MIRROR_BOSSES=1 (with KH2COOP_ENEMY_MIRROR_ALL=1): bosses follow the host's boss too.
+// Bosses follow the host's boss by default (2026-10-19); KH2COOP_MIRROR_BOSSES=0 keeps each game's own boss AI.
 bool MirrorBosses() noexcept;
-// Bosses are copied one by one, after a live check. Single-body bosses only so far; a boss that makes
-// more bodies on its own (Larxene's duplicates) keeps its own AI on each game until it has its own handling.
-inline constexpr std::uint32_t kLexaeusObjectId = 2357;    // Lexaeus (AS), 2026-10-18: position, motion, hits, HP match
-inline constexpr std::uint32_t kTwilightThornObjectId = 307; // Twilight Thorn (B_EX100, type 12), 2026-10-18: candidate
-inline constexpr std::uint32_t kAxelOneObjectId = 2229;      // Axel I (B_EX110_SKIRMISH, Sandlot 02/05 programs 87), candidate
-inline constexpr std::uint32_t kAxelTwoObjectId = 81;        // Axel II (B_EX110, Basement Hall 02/14 programs 137), candidate
-inline constexpr std::uint32_t kMirroredBosses[] = {kLexaeusObjectId, kTwilightThornObjectId, kAxelOneObjectId, kAxelTwoObjectId};
-inline bool BossMirrorReviewed(std::uint32_t objectId) noexcept {
-    for (const auto b : kMirroredBosses) if (objectId == b) return true;
+// Bosses that are never copied: they make more bodies on their own (Larxene's duplicates differ per game).
+// Copied and checked live: Lexaeus 2357, Twilight Thorn 307, Axel I 2229, Axel II 81.
+inline constexpr std::uint32_t kLarxeneObjectId = 2402;      // Larxene (AS) B_EX400, duplicates per game
+inline constexpr std::uint32_t kUncopiedBosses[] = {kLarxeneObjectId};
+inline bool BossMirrorDenied(std::uint32_t objectId) noexcept {
+    for (const auto b : kUncopiedBosses) if (objectId == b) return true;
     return false;
 }
+bool NotedBoss(std::uint32_t objectId) noexcept;  // seen as an objentry boss type in this session
 // KH2COOP_ENEMY_MIRROR_ALL=1 (2026-10-17, candidate): every regular enemy (objentry type 4) is
 // mirrored, not only the reviewed families; bosses (type 3, recorded as they spawn) and the
 // burrowers never are. State lives in EnemySync.cpp (MirrorAll: 0 off, 1 allowed, 2 a boss).
@@ -116,7 +114,8 @@ int MirrorAll(std::uint32_t objectId) noexcept;
 void NoteBoss(std::uint32_t objectId) noexcept;
 inline bool FamilyAllowed(std::uint32_t objectId) noexcept {
     if (IsBurrower(objectId)) return MirrorBurrowers();
-    if (const int all = MirrorAll(objectId)) return all == 1 || (all == 2 && MirrorBosses() && BossMirrorReviewed(objectId));
+    if (NotedBoss(objectId)) return MirrorBosses() && !BossMirrorDenied(objectId);
+    if (MirrorAll(objectId) == 1) return true;
     for (const auto family : kFamilies)
         if (objectId == family) return true;
     return false;
