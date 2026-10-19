@@ -3804,6 +3804,7 @@ bool ResolveOrdinaryBindings(const NativeCensus& census, std::uint32_t generatio
         local.prior = s.ordinaryBinding;
         local.available = !(s.killed && native.hp > 0); // observed lifetime contradiction stays unmatched
         local.living = native.hp > 0;
+        local.boss = offsets::objentry::IsBossType(native.objectType);
         locals.push_back(local);
         indices.push_back(found->second);
     }
